@@ -1,0 +1,92 @@
+package types
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+const (
+	ABIVersion    uint32 = 1
+	SchemaVersion uint32 = 1
+
+	PluginID   = "cpa-codex-guard"
+	PluginName = "CPA Codex Guard"
+	Version    = "0.1.0"
+
+	MethodPluginRegister    = "plugin.register"
+	MethodPluginReconfigure = "plugin.reconfigure"
+
+	MethodRequestInterceptBefore  = "request.intercept_before"
+	MethodRequestInterceptAfter   = "request.intercept_after"
+	MethodResponseInterceptAfter  = "response.intercept_after"
+)
+
+type Envelope struct {
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *EnvelopeError  `json:"error,omitempty"`
+}
+
+type EnvelopeError struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+type Registration struct {
+	SchemaVersion uint32       `json:"schema_version"`
+	Metadata      Metadata     `json:"metadata"`
+	Capabilities  Capabilities `json:"capabilities"`
+}
+
+type Metadata struct {
+	Name             string        `json:"Name"`
+	Version          string        `json:"Version"`
+	Author           string        `json:"Author"`
+	Description      string        `json:"Description"`
+	GitHubRepository string        `json:"GitHubRepository"`
+	ConfigFields     []ConfigField `json:"ConfigFields,omitempty"`
+}
+
+type ConfigField struct {
+	Name        string   `json:"Name"`
+	Type        string   `json:"Type"`
+	EnumValues  []string `json:"EnumValues,omitempty"`
+	Description string   `json:"Description"`
+}
+
+type Capabilities struct {
+	RequestInterceptor  bool `json:"request_interceptor"`
+	ResponseInterceptor bool `json:"response_interceptor"`
+}
+
+type LifecycleRequest struct {
+	ConfigYAML []byte `json:"config_yaml"`
+}
+
+type RequestInterceptRequest struct {
+	RequestID       string         `json:"RequestID"`
+	TraceID         string         `json:"TraceID,omitempty"`
+	SourceFormat    string         `json:"SourceFormat"`
+	ToFormat        string         `json:"ToFormat,omitempty"`
+	Model           string         `json:"Model,omitempty"`
+	RequestedModel  string         `json:"RequestedModel,omitempty"`
+	Stream          bool           `json:"Stream,omitempty"`
+	Headers         http.Header    `json:"Headers,omitempty"`
+	Body            []byte         `json:"Body,omitempty"`
+	StatusCode      int            `json:"StatusCode,omitempty"`
+	ResponseHeaders http.Header    `json:"ResponseHeaders,omitempty"`
+	ResponseBody    []byte         `json:"ResponseBody,omitempty"`
+	Metadata        map[string]any `json:"Metadata,omitempty"`
+}
+
+type RequestInterceptResponse struct {
+	Terminate       bool        `json:"Terminate,omitempty"`
+	StatusCode      int         `json:"StatusCode,omitempty"`
+	ResponseBody    []byte      `json:"ResponseBody,omitempty"`
+	ResponseHeaders http.Header `json:"ResponseHeaders,omitempty"`
+	Body            []byte      `json:"Body,omitempty"`
+	Headers         http.Header `json:"Headers,omitempty"`
+	ClearHeaders    []string    `json:"ClearHeaders,omitempty"`
+}

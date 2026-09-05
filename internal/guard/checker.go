@@ -1,0 +1,305 @@
+package guard
+
+import (
+	"encoding/json"
+	"net/http"
+	"regexp"
+	"strings"
+
+	"cpa-codex-guard/internal/state"
+	"cpa-codex-guard/internal/types"
+)
+
+var (
+	signatureErrorRegex = regexp.MustCompile(`item\s+(rs_[a-zA-Z0-9]+)\s+could\s+not\s+be\s+verified`)
+)
+
+type Checker struct {
+	store                  *state.Store
+	blockMaxTurns          bool
+	blockInvalidSignatures bool
+	autoFixResponsesLite   bool
+	fuzzyCircuitBreaker    bool
+	similarityThreshold    float64
+}
+
+func NewChecker(store *state.Store, blockMaxTurns, blockInvalidSignatures, autoFixResponsesLite, fuzzyCircuitBreaker bool, threshold float64) *Checker {
+	if threshold <= 0 || threshold > 1.0 {
+		threshold = 0.90
+	}
+	return &Checker{
+		store:                  store,
+		blockMaxTurns:          blockMaxTurns,
+		blockInvalidSignatures: blockInvalidSignatures,
+		autoFixResponsesLite:   autoFixResponsesLite,
+		fuzzyCircuitBreaker:    fuzzyCircuitBreaker,
+		similarityThreshold:    threshold,
+	}
+}
+
+// CheckRequest 在 request.intercept_before 钩子中执行
+func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.RequestInterceptResponse {
+	if req == nil || len(req.Body) == 0 {
+		return nil
+	}
+
+	hasMaxTurnsStr := c.blockMaxTurns && containsSubslice(req.Body, []byte(`"max_turns"`))
+	hasReasoningStr := c.blockInvalidSignatures && (containsSubslice(req.Body, []byte(`"reasoning"`)) || containsSubslice(req.Body, []byte(`"rs_`)))
+	isResponsesLite := c.autoFixResponsesLite && isResponsesLiteHeader(req.Headers)
+
+	// 如果没有特殊匹配且未开熔断，快速放行
+	if !hasMaxTurnsStr && !hasReasoningStr && !isResponsesLite && !c.fuzzyCircuitBreaker {
+		return nil
+	}
+
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(req.Body, &root); err != nil {
+		return nil
+	}
+
+	// 1. 静态规则：max_turns 拦截
+	if c.blockMaxTurns {
+		if _, exists := root["max_turns"]; exists {
+			return shortCircuitMaxTurns()
+		}
+	}
+
+	// 提取会话 keys 与 input hash 清单
+	sessionKeys := extractSessionKeys(req.Headers, root)
+	inputHashes := extractInputHashes(root)
+
+	// 2. 动态模糊熔断：若会话处于 3h 熔断且重合度 >= 90%，直接短路返回上次错误体
+	if c.fuzzyCircuitBreaker && len(sessionKeys) > 0 && len(inputHashes) > 0 {
+		if tripped, code, payload := c.store.CheckFuzzyCircuit(sessionKeys, inputHashes, c.similarityThreshold); tripped {
+			if code == 0 {
+				code = 400
+			}
+			if len(payload) == 0 {
+				payload = []byte(`{"error":{"message":"Request temporarily circuit-broken after consecutive errors in session","type":"circuit_breaker_error"}}`)
+			}
+			headers := make(http.Header)
+			headers.Set("Content-Type", "application/json")
+			return &types.RequestInterceptResponse{
+				Terminate:       true,
+				StatusCode:      code,
+				ResponseBody:    payload,
+				ResponseHeaders: headers,
+			}
+		}
+	}
+
+	// 3. 动态规则：thinking_signature_invalid 拦截
+	if c.blockInvalidSignatures {
+		if inputRaw, exists := root["input"]; exists {
+			var inputItems []map[string]json.RawMessage
+			if err := json.Unmarshal(inputRaw, &inputItems); err == nil {
+				for _, item := range inputItems {
+					var itemID string
+					if idRaw, ok := item["id"]; ok {
+						_ = json.Unmarshal(idRaw, &itemID)
+					}
+
+					if itemID != "" {
+						if isInvalid, recordedErr := c.store.IsInvalid(itemID); isInvalid {
+							return shortCircuitInvalidSignature(recordedErr)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 4. 自动修复：Responses-Lite 缺失 reasoning.context
+	if isResponsesLite {
+		needFix := false
+		reasoningRaw, exists := root["reasoning"]
+		if !exists || len(reasoningRaw) == 0 || string(reasoningRaw) == "null" {
+			needFix = true
+			root["reasoning"] = json.RawMessage(`{"context":"all_turns"}`)
+		} else {
+			var reasoningMap map[string]any
+			if err := json.Unmarshal(reasoningRaw, &reasoningMap); err == nil {
+				if ctxVal, ok := reasoningMap["context"]; !ok || ctxVal != "all_turns" {
+					needFix = true
+					reasoningMap["context"] = "all_turns"
+					fixedReasoningBytes, _ := json.Marshal(reasoningMap)
+					root["reasoning"] = json.RawMessage(fixedReasoningBytes)
+				}
+			}
+		}
+
+		if needFix {
+			fixedBody, err := json.Marshal(root)
+			if err == nil {
+				return &types.RequestInterceptResponse{
+					Terminate: false,
+					Body:      fixedBody,
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// ObserveResponse 在 request.intercept_after / response.intercept_after 钩子中执行
+func (c *Checker) ObserveResponse(req *types.RequestInterceptRequest) {
+	if req == nil {
+		return
+	}
+
+	reqBody := req.Body
+	if len(reqBody) == 0 && len(req.ResponseBody) > 0 {
+		// 某些 ResponseIntercept 结构可能会分别存放在不同的字段
+	}
+
+	var root map[string]json.RawMessage
+	if len(reqBody) > 0 {
+		_ = json.Unmarshal(reqBody, &root)
+	}
+
+	sessionKeys := extractSessionKeys(req.Headers, root)
+	inputHashes := extractInputHashes(root)
+
+	// 1. 记录模糊熔断结果（无论是成功 200 重置，还是连续失败累计）
+	if c.fuzzyCircuitBreaker && len(sessionKeys) > 0 {
+		c.store.RecordResponseOutcome(sessionKeys, inputHashes, req.StatusCode, req.ResponseBody, c.similarityThreshold)
+	}
+
+	// 2. 捕获 thinking_signature_invalid 并持久化记录失效 itemID
+	if req.StatusCode == 400 && len(req.ResponseBody) > 0 {
+		respBodyStr := string(req.ResponseBody)
+		matches := signatureErrorRegex.FindStringSubmatch(respBodyStr)
+		if len(matches) >= 2 {
+			failedItemID := matches[1]
+			sess := ""
+			if len(sessionKeys) > 0 {
+				sess = sessionKeys[0]
+			}
+			c.store.MarkInvalid(failedItemID, sess, req.ResponseBody)
+		}
+	}
+}
+
+func extractSessionKeys(headers http.Header, root map[string]json.RawMessage) []string {
+	keys := make([]string, 0, 4)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			for _, existing := range keys {
+				if existing == v {
+					return
+				}
+			}
+			keys = append(keys, v)
+		}
+	}
+
+	// Header
+	if headers != nil {
+		add(headers.Get("Session-Id"))
+		add(headers.Get("X-Codex-Window-Id"))
+	}
+
+	// Client metadata
+	if root != nil {
+		if metaRaw, ok := root["client_metadata"]; ok && len(metaRaw) > 0 {
+			var meta map[string]any
+			if err := json.Unmarshal(metaRaw, &meta); err == nil {
+				if s, ok := meta["session_id"].(string); ok {
+					add(s)
+				}
+				if r, ok := meta["root_turn_id"].(string); ok {
+					add(r)
+				}
+				if w, ok := meta["x-codex-window-id"].(string); ok {
+					add(w)
+				}
+			}
+		}
+	}
+
+	return keys
+}
+
+func extractInputHashes(root map[string]json.RawMessage) []string {
+	if root == nil {
+		return nil
+	}
+	inputRaw, exists := root["input"]
+	if !exists || len(inputRaw) == 0 {
+		return nil
+	}
+
+	var items []any
+	if err := json.Unmarshal(inputRaw, &items); err != nil {
+		return nil
+	}
+
+	hashes := make([]string, 0, len(items))
+	for _, it := range items {
+		hashes = append(hashes, state.HashJSON(it))
+	}
+	return hashes
+}
+
+func isResponsesLiteHeader(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+	for k, v := range headers {
+		if strings.EqualFold(k, "X-OpenAI-Internal-Codex-Responses-Lite") {
+			for _, val := range v {
+				if strings.EqualFold(val, "true") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func shortCircuitMaxTurns() *types.RequestInterceptResponse {
+	respBody := []byte(`{"error":{"message":"Bad Request","type":"invalid_request_error"}}`)
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	return &types.RequestInterceptResponse{
+		Terminate:       true,
+		StatusCode:      400,
+		ResponseBody:    respBody,
+		ResponseHeaders: headers,
+	}
+}
+
+func shortCircuitInvalidSignature(payload []byte) *types.RequestInterceptResponse {
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	return &types.RequestInterceptResponse{
+		Terminate:       true,
+		StatusCode:      400,
+		ResponseBody:    payload,
+		ResponseHeaders: headers,
+	}
+}
+
+func containsSubslice(haystack, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
