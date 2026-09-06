@@ -36,7 +36,7 @@ func DefaultConfig() *Config {
 		SimilarityThreshold:    0.90,
 
 		ProbeCacheEnabled:   &t,
-		ProbeCacheTTLStr:    "24h",
+		ProbeCacheTTLStr:    "72h",
 		ProbeStateFile:      "data/cpa-probe-cache-state.json",
 		ProbeMaxInputBytes:  20480, // 20KB
 		ProbeMaxOutputChars: 200,   // 200 字符
@@ -68,11 +68,11 @@ func (c *Config) ParseCircuitTTL() time.Duration {
 
 func (c *Config) ParseProbeTTL() time.Duration {
 	if c.ProbeCacheTTLStr == "" {
-		return 24 * time.Hour
+		return 72 * time.Hour
 	}
 	d, err := time.ParseDuration(c.ProbeCacheTTLStr)
 	if err != nil || d <= 0 {
-		return 24 * time.Hour
+		return 72 * time.Hour
 	}
 	return d
 }

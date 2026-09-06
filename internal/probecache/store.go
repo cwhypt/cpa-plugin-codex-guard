@@ -45,7 +45,7 @@ type Store struct {
 
 func NewStore(filePath string, ttl time.Duration, minSamples int) *Store {
 	if ttl <= 0 {
-		ttl = 24 * time.Hour
+		ttl = 72 * time.Hour
 	}
 	if minSamples <= 0 {
 		minSamples = 3
