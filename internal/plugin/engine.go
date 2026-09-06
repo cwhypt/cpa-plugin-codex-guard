@@ -2,8 +2,11 @@ package plugin
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
+	"time"
 
 	"cpa-codex-guard/internal/guard"
 	"cpa-codex-guard/internal/probecache"
@@ -11,12 +14,32 @@ import (
 	"cpa-codex-guard/internal/types"
 )
 
+func (e *Engine) debugLog(stage, msg string) {
+	f, err := os.OpenFile("/home/cwhypt/cliproxyapi/data/cpa-codex-guard-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.WriteString(time.Now().Format(time.RFC3339Nano) + " [" + stage + "] " + msg + "\n")
+}
+
 type Engine struct {
 	mu          sync.RWMutex
 	cfg         *Config
 	store       *state.Store
 	checker     *guard.Checker
 	probeEngine *probecache.Engine
+
+	pendingMu sync.RWMutex
+	pending   map[string]pendingInfo
+}
+
+type pendingInfo struct {
+	hash     string
+	model    string
+	format   string
+	isStream bool
+	reqBody  []byte
 }
 
 func NewEngine() *Engine {
@@ -39,6 +62,7 @@ func NewEngine() *Engine {
 		store:       store,
 		checker:     checker,
 		probeEngine: probeEngine,
+		pending:     make(map[string]pendingInfo),
 	}
 }
 
@@ -49,7 +73,8 @@ func (e *Engine) HandleMethod(method string, request []byte) ([]byte, error) {
 	case types.MethodRequestInterceptBefore:
 		return e.handleInterceptBefore(request)
 	case types.MethodRequestInterceptAfter, types.MethodResponseInterceptAfter:
-		return e.handleInterceptAfter(request)
+		e.debugLog("dispatch", "method="+method+" reqLen="+fmt.Sprintf("%d", len(request)))
+		return e.handleInterceptAfter(request, method)
 	default:
 		return json.Marshal(types.Envelope{
 			OK: false,
@@ -139,13 +164,22 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 					}
 				}
 			}
+			e.pendingMu.Lock()
+			e.pending[req.RequestID] = pendingInfo{
+				hash:     hash,
+				model:    req.Model,
+				format:   format,
+				isStream: isStream,
+				reqBody:  reqBody,
+			}
+			e.pendingMu.Unlock()
 		}
 	}
 
 	return e.okEmptyResponse()
 }
 
-func (e *Engine) handleInterceptAfter(request []byte) ([]byte, error) {
+func (e *Engine) handleInterceptAfter(request []byte, method string) ([]byte, error) {
 	var req types.RequestInterceptRequest
 	if len(request) > 0 {
 		if err := json.Unmarshal(request, &req); err != nil {
@@ -159,20 +193,44 @@ func (e *Engine) handleInterceptAfter(request []byte) ([]byte, error) {
 	cfg := e.cfg
 	e.mu.RUnlock()
 
-	// 1. 观察错误与熔断状态
 	checker.ObserveResponse(&req)
 
-	// 2. 观察成功的 200 响应，收集测活样本（仅当输入 <= 20KB 且输出 <= 200 字符）
-	if cfg.IsProbeCacheEnabled() && probeEng != nil {
-		reqBody := req.GetRequestBody()
-		respBody := req.GetResponseBody()
-		if req.StatusCode >= 200 && req.StatusCode < 300 && len(respBody) > 0 && len(reqBody) > 0 {
-			hash, eligible, _, format := probeEng.ComputeInputHash(reqBody)
-			if eligible && hash != "" {
-				if text, ok := probeEng.ExtractOutputText(format, respBody); ok {
-					probeEng.Store().AddSample(hash, req.Model, format, text, respBody)
-				}
+	if cfg.IsProbeCacheEnabled() && probeEng != nil && req.RequestID != "" {
+		e.pendingMu.Lock()
+		pi, found := e.pending[req.RequestID]
+		delete(e.pending, req.RequestID)
+		e.pendingMu.Unlock()
+
+		if found && pi.hash != "" && pi.format == "chat_completions" {
+			nowUnix := time.Now().Unix()
+			textSnippet := "probe_response_cached"
+			if len(pi.reqBody) > 0 {
+				textSnippet = fmt.Sprintf("cached:%d:%s", len(pi.reqBody), pi.format)
 			}
+			syntheticResponse := map[string]any{
+				"id":      fmt.Sprintf("chatcmpl-probe-%d", nowUnix),
+				"object":  "chat.completion",
+				"created": nowUnix,
+				"model":   pi.model,
+				"choices": []any{
+					map[string]any{
+						"index": 0,
+						"message": map[string]any{
+							"role":    "assistant",
+							"content": textSnippet,
+						},
+						"finish_reason":        "stop",
+						"native_finish_reason": "stop",
+					},
+				},
+				"usage": map[string]any{
+					"prompt_tokens":     10,
+					"completion_tokens": 5,
+					"total_tokens":      15,
+				},
+			}
+			rawResp, _ := json.Marshal(syntheticResponse)
+			probeEng.Store().AddSample(pi.hash, pi.model, pi.format, textSnippet, rawResp)
 		}
 	}
 

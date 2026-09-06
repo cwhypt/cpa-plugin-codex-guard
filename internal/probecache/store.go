@@ -130,6 +130,7 @@ func (s *Store) GetRandomSample(inputHash string) (*Sample, bool) {
 	entry.HitCount++
 	s.entries[inputHash] = entry
 	s.isDirty = true
+	_ = s.saveLocked()
 
 	chosen := entry.Samples[idx]
 	return &chosen, true
