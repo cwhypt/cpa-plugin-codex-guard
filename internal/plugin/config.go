@@ -13,6 +13,14 @@ type Config struct {
 	AutoFixResponsesLite   *bool   `json:"autofix_responses_lite" yaml:"autofix_responses_lite"`
 	FuzzyCircuitBreaker    *bool   `json:"fuzzy_circuit_breaker" yaml:"fuzzy_circuit_breaker"`
 	SimilarityThreshold    float64 `json:"fuzzy_similarity_threshold" yaml:"fuzzy_similarity_threshold"`
+
+	// 测活流量智能缓存配置
+	ProbeCacheEnabled  *bool  `json:"probe_cache_enabled" yaml:"probe_cache_enabled"`
+	ProbeCacheTTLStr   string `json:"probe_cache_ttl" yaml:"probe_cache_ttl"`
+	ProbeStateFile     string `json:"probe_state_file" yaml:"probe_state_file"`
+	ProbeMaxInputBytes int    `json:"probe_max_input_bytes" yaml:"probe_max_input_bytes"`
+	ProbeMaxOutputChars int   `json:"probe_max_output_chars" yaml:"probe_max_output_chars"`
+	ProbeMinSamples    int    `json:"probe_min_samples" yaml:"probe_min_samples"`
 }
 
 func DefaultConfig() *Config {
@@ -26,6 +34,13 @@ func DefaultConfig() *Config {
 		AutoFixResponsesLite:   &t,
 		FuzzyCircuitBreaker:    &t,
 		SimilarityThreshold:    0.90,
+
+		ProbeCacheEnabled:   &t,
+		ProbeCacheTTLStr:    "24h",
+		ProbeStateFile:      "data/cpa-probe-cache-state.json",
+		ProbeMaxInputBytes:  20480, // 20KB
+		ProbeMaxOutputChars: 200,   // 200 字符
+		ProbeMinSamples:     3,     // 至少收集 3 个不同样本后激活
 	}
 }
 
@@ -47,6 +62,17 @@ func (c *Config) ParseCircuitTTL() time.Duration {
 	d, err := time.ParseDuration(c.CircuitTTLStr)
 	if err != nil || d <= 0 {
 		return 3 * time.Hour
+	}
+	return d
+}
+
+func (c *Config) ParseProbeTTL() time.Duration {
+	if c.ProbeCacheTTLStr == "" {
+		return 24 * time.Hour
+	}
+	d, err := time.ParseDuration(c.ProbeCacheTTLStr)
+	if err != nil || d <= 0 {
+		return 24 * time.Hour
 	}
 	return d
 }
@@ -77,6 +103,13 @@ func (c *Config) IsFuzzyCircuitBreaker() bool {
 		return true
 	}
 	return *c.FuzzyCircuitBreaker
+}
+
+func (c *Config) IsProbeCacheEnabled() bool {
+	if c.ProbeCacheEnabled == nil {
+		return true
+	}
+	return *c.ProbeCacheEnabled
 }
 
 func (c *Config) GetSimilarityThreshold() float64 {

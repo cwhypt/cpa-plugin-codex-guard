@@ -6,15 +6,17 @@ import (
 	"sync"
 
 	"cpa-codex-guard/internal/guard"
+	"cpa-codex-guard/internal/probecache"
 	"cpa-codex-guard/internal/state"
 	"cpa-codex-guard/internal/types"
 )
 
 type Engine struct {
-	mu      sync.RWMutex
-	cfg     *Config
-	store   *state.Store
-	checker *guard.Checker
+	mu          sync.RWMutex
+	cfg         *Config
+	store       *state.Store
+	checker     *guard.Checker
+	probeEngine *probecache.Engine
 }
 
 func NewEngine() *Engine {
@@ -29,10 +31,14 @@ func NewEngine() *Engine {
 		cfg.GetSimilarityThreshold(),
 	)
 
+	probeStore := probecache.NewStore(cfg.ProbeStateFile, cfg.ParseProbeTTL(), cfg.ProbeMinSamples)
+	probeEngine := probecache.NewEngine(probeStore, cfg.ProbeMaxInputBytes, cfg.ProbeMaxOutputChars)
+
 	return &Engine{
-		cfg:     cfg,
-		store:   store,
-		checker: checker,
+		cfg:         cfg,
+		store:       store,
+		checker:     checker,
+		probeEngine: probeEngine,
 	}
 }
 
@@ -63,7 +69,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 			Name:             types.PluginID,
 			Version:          types.Version,
 			Author:           "OpenCode",
-			Description:      "Guards against max_turns, invalid signatures, auto-fixes Responses-Lite context, and fuzzy circuit breaks repeated errors",
+			Description:      "Guards against max_turns, invalid signatures, auto-fixes Responses-Lite context, fuzzy circuit breaks, and caches probe traffic",
 			GitHubRepository: "https://github.com/cwhypt/cliproxyapi",
 			ConfigFields: []types.ConfigField{
 				{Name: "state_file", Type: "string", Description: "Path to state persistence file"},
@@ -73,6 +79,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 				{Name: "block_invalid_signatures", Type: "boolean", Description: "Block requests with known invalid thinking signatures"},
 				{Name: "autofix_responses_lite", Type: "boolean", Description: "Auto-fix missing reasoning.context for Responses-Lite requests"},
 				{Name: "fuzzy_circuit_breaker", Type: "boolean", Description: "Enable session-level fuzzy similarity circuit breaker"},
+				{Name: "probe_cache_enabled", Type: "boolean", Description: "Enable caching and randomized playback for probe traffic"},
 			},
 		},
 		Capabilities: types.Capabilities{
@@ -98,22 +105,43 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 
 	e.mu.RLock()
 	checker := e.checker
+	probeEng := e.probeEngine
+	cfg := e.cfg
 	e.mu.RUnlock()
 
+	// 1. 先进行 Guard 规则检查 (max_turns, thinking_signature, fuzzy circuit breaker, auto-fix)
 	res := checker.CheckRequest(&req)
-	if res == nil {
-		return e.okEmptyResponse()
+	if res != nil {
+		resBytes, err := json.Marshal(res)
+		if err != nil {
+			return e.okEmptyResponse()
+		}
+		return json.Marshal(types.Envelope{
+			OK:     true,
+			Result: resBytes,
+		})
 	}
 
-	resBytes, err := json.Marshal(res)
-	if err != nil {
-		return e.okEmptyResponse()
+	// 2. 若未被拦截，检查测活缓存命中 (probe cache)
+	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.Body) > 0 {
+		hash, eligible, isStream, format := probeEng.ComputeInputHash(req.Body)
+		if eligible && hash != "" {
+			if sample, hit := probeEng.Store().GetRandomSample(hash); hit {
+				probeResp := probeEng.FormatResponse(sample, isStream, format, req.Model)
+				if probeResp != nil {
+					resBytes, err := json.Marshal(probeResp)
+					if err == nil {
+						return json.Marshal(types.Envelope{
+							OK:     true,
+							Result: resBytes,
+						})
+					}
+				}
+			}
+		}
 	}
 
-	return json.Marshal(types.Envelope{
-		OK:     true,
-		Result: resBytes,
-	})
+	return e.okEmptyResponse()
 }
 
 func (e *Engine) handleInterceptAfter(request []byte) ([]byte, error) {
@@ -126,9 +154,25 @@ func (e *Engine) handleInterceptAfter(request []byte) ([]byte, error) {
 
 	e.mu.RLock()
 	checker := e.checker
+	probeEng := e.probeEngine
+	cfg := e.cfg
 	e.mu.RUnlock()
 
+	// 1. 观察错误与熔断状态
 	checker.ObserveResponse(&req)
+
+	// 2. 观察成功的 200 响应，收集测活样本（仅当输入 <= 20KB 且输出 <= 200 字符）
+	if cfg.IsProbeCacheEnabled() && probeEng != nil {
+		if req.StatusCode >= 200 && req.StatusCode < 300 && len(req.ResponseBody) > 0 {
+			hash, eligible, _, format := probeEng.ComputeInputHash(req.Body)
+			if eligible && hash != "" {
+				if text, ok := probeEng.ExtractOutputText(format, req.ResponseBody); ok {
+					probeEng.Store().AddSample(hash, req.Model, format, text, req.ResponseBody)
+				}
+			}
+		}
+	}
+
 	return e.okEmptyResponse()
 }
 
