@@ -35,8 +35,8 @@ type Engine struct {
 	checker     *guard.Checker
 	probeEngine *probecache.Engine
 
-	pendingMu sync.RWMutex
-	pending   map[string]pendingInfo
+	pendingMu sync.Mutex
+	pending   map[string]*pendingInfo
 }
 
 type pendingInfo struct {
@@ -76,7 +76,7 @@ func newEngineWithConfig(cfg *Config) *Engine {
 		store:       store,
 		checker:     checker,
 		probeEngine: probeEngine,
-		pending:     make(map[string]pendingInfo),
+		pending:     make(map[string]*pendingInfo),
 	}
 	go e.pendingJanitor()
 	return e
@@ -210,14 +210,16 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 				root := map[string]json.RawMessage{}
 				_ = json.Unmarshal(reqBody, &root)
 				e.pendingMu.Lock()
-				e.pending[req.RequestID] = pendingInfo{
-					hash:        hash,
-					model:       req.Model,
-					format:      format,
-					isStream:    isStream,
-					seenAt:      time.Now(),
-					sessionKeys: guard.ExtractSessionKeys(req.GetHeaders(), root),
-					inputHashes: guard.ExtractInputHashes(root),
+				if _, ok := e.pending[req.RequestID]; !ok {
+					e.pending[req.RequestID] = &pendingInfo{
+						hash:        hash,
+						model:       req.Model,
+						format:      format,
+						isStream:    isStream,
+						seenAt:      time.Now(),
+						sessionKeys: guard.ExtractSessionKeys(req.GetHeaders(), root),
+						inputHashes: guard.ExtractInputHashes(root),
+					}
 				}
 				e.pendingMu.Unlock()
 			}
@@ -364,7 +366,7 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 				if _, ok := e.pending[req.RequestID]; !ok {
 					root := map[string]json.RawMessage{}
 					_ = json.Unmarshal(req.RequestBody, &root)
-					e.pending[req.RequestID] = pendingInfo{
+					e.pending[req.RequestID] = &pendingInfo{
 						hash:        hash,
 						model:       req.Model,
 						format:      format,
@@ -385,14 +387,12 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 		e.pendingMu.Lock()
 		p, ok := e.pending[req.RequestID]
 		if ok {
-			chunkCount := strings.Count(string(req.Body), "data:")
+			p.chunkCount += strings.Count(string(req.Body), "data:")
 			p.streamText.Write(req.Body)
 			// Each chunk is a bare SSE frame without a trailing blank line;
 			// append the SSE frame separator so frames never concatenate.
 			p.streamText.WriteString("\n\n")
 			p.seenAt = time.Now()
-			p.chunkCount += chunkCount
-			e.pending[req.RequestID] = p
 		}
 		e.pendingMu.Unlock()
 		if !ok {
@@ -405,7 +405,7 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 
 // collectStreamSample finalizes a streaming sample when the request completes
 // successfully. Only called from handleRequestComplete for succeeded streams.
-func (e *Engine) collectStreamSample(reqID string, p pendingInfo) {
+func (e *Engine) collectStreamSample(reqID string, p *pendingInfo) {
 	e.mu.RLock()
 	probeEng := e.probeEngine
 	cfg := e.cfg

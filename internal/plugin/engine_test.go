@@ -82,7 +82,7 @@ func TestResponseInterceptAfterCollectsRealSample(t *testing.T) {
 	if !eligible || hash == "" {
 		t.Fatalf("expected eligible hash")
 	}
-	engine.pending["req-1"] = pendingInfo{hash: hash, model: "m-test", format: "chat_completions", seenAt: time.Now()}
+	engine.pending["req-1"] = &pendingInfo{hash: hash, model: "m-test", format: "chat_completions", seenAt: time.Now()}
 
 	raw := mustResponseIntercept(t, reqBody, respBody)
 	if _, err := engine.HandleMethod(types.MethodResponseInterceptAfter, raw); err != nil {
@@ -97,9 +97,9 @@ func TestResponseInterceptAfterCollectsRealSample(t *testing.T) {
 		t.Fatalf("expected sample text 'pong', got %q", samples[0].Text)
 	}
 
-	engine.pendingMu.RLock()
+	engine.pendingMu.Lock()
 	_, stillPending := engine.pending["req-1"]
-	engine.pendingMu.RUnlock()
+	engine.pendingMu.Unlock()
 	if stillPending {
 		t.Fatalf("pending entry should be consumed by response hook")
 	}
@@ -114,7 +114,7 @@ func TestRequestCompleteEvictsPending(t *testing.T) {
 	if !eligible || hash == "" {
 		t.Fatalf("expected eligible hash")
 	}
-	engine.pending["req-429"] = pendingInfo{hash: hash, model: "m-test", format: "chat_completions", seenAt: time.Now()}
+	engine.pending["req-429"] = &pendingInfo{hash: hash, model: "m-test", format: "chat_completions", seenAt: time.Now()}
 
 	completion := types.RequestCompletion{
 		RequestID:  "req-429",
@@ -129,9 +129,9 @@ func TestRequestCompleteEvictsPending(t *testing.T) {
 		t.Fatalf("request.complete failed: %v", err)
 	}
 
-	engine.pendingMu.RLock()
+	engine.pendingMu.Lock()
 	_, stillPending := engine.pending["req-429"]
-	engine.pendingMu.RUnlock()
+	engine.pendingMu.Unlock()
 	if stillPending {
 		t.Fatalf("pending entry should be evicted by request.complete")
 	}
@@ -175,4 +175,76 @@ func mustResponseIntercept(t *testing.T, reqBody, respBody []byte) []byte {
 		t.Fatalf("marshal response intercept: %v", err)
 	}
 	return raw
+}
+
+// Streaming: header-init seeds pending, payload chunks accumulate SSE text,
+// request.complete finalizes the sample. Regression test for the strings.
+// Builder copy panic (map value copy) that crashed the host process.
+func TestStreamChunkCollectsSampleOnComplete(t *testing.T) {
+	engine := newTestEngine(t)
+	reqBody := []byte(`{"model":"m-test","stream":true,"messages":[{"role":"user","content":"ping"}]}`)
+
+	initRaw, err := json.Marshal(types.StreamChunkInterceptRequest{
+		RequestID:    "req-stream-1",
+		SourceFormat: "openai",
+		Model:        "m-test",
+		RequestBody:  reqBody,
+		ChunkIndex:   types.StreamChunkHeaderInitIndex,
+	})
+	if err != nil {
+		t.Fatalf("marshal init chunk: %v", err)
+	}
+	if _, err := engine.HandleMethod(types.MethodResponseInterceptStreamChunk, initRaw); err != nil {
+		t.Fatalf("stream header-init failed: %v", err)
+	}
+
+	for _, frame := range []string{
+		`data: {"choices":[{"delta":{"role":"assistant"}}]}`,
+		`data: {"choices":[{"delta":{"content":"He"}}]}`,
+		`data: {"choices":[{"delta":{"content":"llo"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	} {
+		raw, errMarshal := json.Marshal(types.StreamChunkInterceptRequest{
+			RequestID:  "req-stream-1",
+			Model:      "m-test",
+			Body:       []byte(frame),
+			ChunkIndex: 1,
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal chunk: %v", errMarshal)
+		}
+		if _, err := engine.HandleMethod(types.MethodResponseInterceptStreamChunk, raw); err != nil {
+			t.Fatalf("stream chunk failed: %v", err)
+		}
+	}
+
+	hash, _, _, _ := engine.probeEngine.ComputeInputHash(reqBody)
+	completionRaw, err := json.Marshal(types.RequestCompletion{
+		RequestID:  "req-stream-1",
+		Outcome:    types.OutcomeSucceeded,
+		StatusCode: 200,
+		Stream:     true,
+	})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if _, err := engine.HandleMethod(types.MethodRequestComplete, completionRaw); err != nil {
+		t.Fatalf("request.complete failed: %v", err)
+	}
+
+	samples, ok := engine.probeEngine.Store().PeekSamples(hash)
+	if !ok || len(samples) == 0 {
+		t.Fatalf("expected stream sample collected on request.complete")
+	}
+	if samples[0].Text != "Hello" {
+		t.Fatalf("expected stream sample text Hello, got %q", samples[0].Text)
+	}
+
+	engine.pendingMu.Lock()
+	_, stillPending := engine.pending["req-stream-1"]
+	engine.pendingMu.Unlock()
+	if stillPending {
+		t.Fatalf("pending entry should be evicted after completion")
+	}
 }
