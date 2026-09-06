@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -45,12 +46,18 @@ func TestEngineRegister(t *testing.T) {
 // touch the production probe-cache/guard state under data/.
 func newTestEngine(t *testing.T) *Engine {
 	t.Helper()
-	dir := t.TempDir()
+	return newTestEngineInDir(t, t.TempDir())
+}
+
+func newTestEngineInDir(t *testing.T, dir string) *Engine {
+	t.Helper()
 	cfg := DefaultConfig()
 	cfg.StateFile = dir + "/guard-state.json"
 	cfg.ProbeStateFile = dir + "/probe-state.json"
 	return newEngineWithConfig(cfg)
 }
+
+func probeStateFilePath(e *Engine) string { return e.cfg.ProbeStateFile }
 
 func TestRequestInterceptAfterDoesNotCollectSample(t *testing.T) {
 	engine := newTestEngine(t)
@@ -243,6 +250,12 @@ func TestStreamChunkCollectsSampleOnComplete(t *testing.T) {
 
 	engine.pendingMu.Lock()
 	_, stillPending := engine.pending["req-stream-1"]
+
+	// 回归：流式样本的 raw 曾是纯文本，json.RawMessage 非法导致整个状态文件
+	// MarshalIndent 失败、静默不落盘。修复后 probe 状态文件必须真实存在。
+	if _, statErr := os.Stat(probeStateFilePath(engine)); statErr != nil {
+		t.Fatalf("probe state file must be persisted after stream sample: %v", statErr)
+	}
 	engine.pendingMu.Unlock()
 	if stillPending {
 		t.Fatalf("pending entry should be evicted after completion")

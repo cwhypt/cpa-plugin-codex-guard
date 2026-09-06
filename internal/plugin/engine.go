@@ -429,7 +429,14 @@ func (e *Engine) collectStreamSample(reqID string, p *pendingInfo) {
 		e.debugLog("stream-collect", fmt.Sprintf("EMPTY_TEXT reqId=%s raw=%q", reqID, raw))
 		return
 	}
-	probeEng.Store().AddSample(p.hash, p.model, p.format, text, []byte(text))
+	// RawResponse 是 json.RawMessage：纯文本会破坏 MarshalIndent，导致整个
+	// 状态文件保存静默失败（v0.3.0 流式样本从未落盘的根因）。包一层合法 JSON。
+	raw, rawErr := json.Marshal(map[string]any{"text": text})
+	if rawErr != nil {
+		e.debugLog("stream-collect", fmt.Sprintf("RAW_MARSHAL_ERROR reqId=%s err=%v", reqID, rawErr))
+		return
+	}
+	probeEng.Store().AddSample(p.hash, p.model, p.format, text, raw)
 	if err := probeEng.Store().LastError(); err != nil {
 		e.debugLog("stream-collect", fmt.Sprintf("PERSIST_ERROR reqId=%s store=%s err=%v", reqID, "probe", err))
 	}
