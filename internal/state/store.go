@@ -135,7 +135,7 @@ func (s *Store) CheckFuzzyCircuit(keys []string, currentHashes []string, thresho
 
 // RecordResponseOutcome 记录请求结果，用于熔断判定
 func (s *Store) RecordResponseOutcome(keys []string, currentHashes []string, statusCode int, respPayload []byte, threshold float64) {
-	if len(keys) == 0 {
+	if len(keys) == 0 || statusCode == 0 {
 		return
 	}
 
@@ -253,7 +253,7 @@ func (s *Store) load() error {
 		}
 	}
 	for k, v := range state.CircuitSessions {
-		if v.CircuitExpireAt.IsZero() || now.Before(v.CircuitExpireAt) {
+		if (v.CircuitExpireAt.IsZero() || now.Before(v.CircuitExpireAt)) && v.LastStatusCode != 0 {
 			s.circuits[k] = v
 		}
 	}
@@ -280,7 +280,7 @@ func (s *Store) saveLocked() error {
 	}
 	activeCircuits := make(map[string]SessionCircuit)
 	for k, v := range s.circuits {
-		if v.CircuitExpireAt.IsZero() || now.Before(v.CircuitExpireAt) {
+		if (v.CircuitExpireAt.IsZero() || now.Before(v.CircuitExpireAt)) && v.LastStatusCode != 0 {
 			activeCircuits[k] = v
 		}
 	}

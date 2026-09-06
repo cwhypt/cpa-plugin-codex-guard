@@ -11,7 +11,7 @@ const (
 
 	PluginID   = "cpa-codex-guard"
 	PluginName = "CPA Codex Guard"
-	Version    = "0.2.0"
+	Version    = "0.3.0"
 
 	MethodPluginRegister    = "plugin.register"
 	MethodPluginReconfigure = "plugin.reconfigure"
@@ -21,6 +21,16 @@ const (
 	MethodRequestInterceptAfter  = "request.intercept_after"
 	MethodResponseInterceptAfter = "response.intercept_after"
 	MethodRequestComplete        = "request.complete"
+
+	// MethodResponseInterceptStreamChunk matches pluginabi.MethodResponseInterceptStreamChunk.
+	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
+
+	// StreamChunkHeaderInitIndex marks the header-only stream initialization call.
+	StreamChunkHeaderInitIndex = -1
+
+	// Outcome values from pluginapi.RequestCompletionOutcome.
+	OutcomeSucceeded = "succeeded"
+	OutcomeFailed    = "failed"
 )
 
 type Envelope struct {
@@ -62,6 +72,7 @@ type Capabilities struct {
 	RequestInterceptor     bool `json:"request_interceptor"`
 	ResponseInterceptor    bool `json:"response_interceptor"`
 	RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
+	StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 }
 
 type LifecycleRequest struct {
@@ -81,6 +92,7 @@ type RequestInterceptRequest struct {
 	Body            []byte         `json:"Body,omitempty"`
 	RequestBody     []byte         `json:"RequestBody,omitempty"`
 	StatusCode      int            `json:"StatusCode,omitempty"`
+	OriginalRequest []byte         `json:"OriginalRequest,omitempty"`
 	ResponseHeaders http.Header    `json:"ResponseHeaders,omitempty"`
 	ResponseBody    []byte         `json:"ResponseBody,omitempty"`
 	Metadata        map[string]any `json:"Metadata,omitempty"`
@@ -130,4 +142,28 @@ type RequestCompletion struct {
 	StatusCode     int            `json:"StatusCode"`
 	Error          string         `json:"Error"`
 	Metadata       map[string]any `json:"Metadata"`
+}
+
+// StreamChunkInterceptRequest mirrors pluginapi.StreamChunkInterceptRequest (schema v3).
+type StreamChunkInterceptRequest struct {
+	RequestID       string         `json:"RequestID"`
+	SourceFormat    string         `json:"SourceFormat"`
+	Model           string         `json:"Model"`
+	RequestedModel  string         `json:"RequestedModel"`
+	RequestHeaders  http.Header    `json:"RequestHeaders,omitempty"`
+	ResponseHeaders http.Header    `json:"ResponseHeaders,omitempty"`
+	OriginalRequest []byte         `json:"OriginalRequest,omitempty"`
+	RequestBody     []byte         `json:"RequestBody,omitempty"`
+	Body            []byte         `json:"Body,omitempty"`
+	HistoryChunks   [][]byte       `json:"HistoryChunks,omitempty"`
+	ChunkIndex      int            `json:"ChunkIndex"`
+	Metadata        map[string]any `json:"Metadata,omitempty"`
+}
+
+// StreamChunkInterceptResponse mirrors pluginapi.StreamChunkInterceptResponse.
+type StreamChunkInterceptResponse struct {
+	Headers      http.Header `json:"Headers,omitempty"`
+	Body         []byte      `json:"Body,omitempty"`
+	ClearHeaders []string    `json:"ClearHeaders,omitempty"`
+	DropChunk    bool        `json:"DropChunk,omitempty"`
 }

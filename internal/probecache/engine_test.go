@@ -1,6 +1,7 @@
 package probecache
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -102,5 +103,100 @@ func TestEngineFormatResponseStreamAndNonStream(t *testing.T) {
 	}
 	if !strings.Contains(string(respStream.ResponseBody), "data: [DONE]") {
 		t.Errorf("stream body missing [DONE]: %s", string(respStream.ResponseBody))
+	}
+}
+
+func TestHashIgnoresFormatAndStream(t *testing.T) {
+	store := NewStore("", 24*time.Hour, 3)
+	eng := NewEngine(store, 20480, 500)
+
+	// ?? model+input,?? format/stream -> ??? hash
+	bodyChat := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}`)
+	bodyChatStream := []byte(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"ping"}]}`)
+	bodyResponses := []byte(`{"model":"gpt-4o","input":[{"role":"user","content":"ping"}]}`)
+
+	h1, ok1, _, _ := eng.ComputeInputHash(bodyChat)
+	h2, ok2, _, _ := eng.ComputeInputHash(bodyChatStream)
+	h3, ok3, _, _ := eng.ComputeInputHash(bodyResponses)
+
+	if !ok1 || !ok2 || !ok3 {
+		t.Fatalf("all three bodies should be eligible")
+	}
+	if h1 != h2 || h1 != h3 {
+		t.Fatalf("hash must match on model+input only: chat=%s stream=%s responses=%s", h1[:12], h2[:12], h3[:12])
+	}
+}
+
+func TestExtractStreamTextChatCompletions(t *testing.T) {
+	store := NewStore("", 24*time.Hour, 3)
+	eng := NewEngine(store, 20480, 500)
+
+	chunks := [][]byte{
+		[]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"),
+		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"),
+		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"lo!\"}}]}\n\n"),
+		[]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
+		[]byte("data: [DONE]\n\n"),
+	}
+
+	text, ok := eng.ExtractStreamText("chat_completions", chunks)
+	if !ok || text != "Hello!" {
+		t.Fatalf("expected Hello!, got %q ok=%v", text, ok)
+	}
+}
+
+func TestExtractStreamTextResponses(t *testing.T) {
+	store := NewStore("", 24*time.Hour, 3)
+	eng := NewEngine(store, 20480, 500)
+
+	chunks := [][]byte{
+		[]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"wor\"}\n\n"),
+		[]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ld\"}\n\n"),
+		[]byte("data: [DONE]\n\n"),
+	}
+
+	text, ok := eng.ExtractStreamText("responses", chunks)
+	if !ok || text != "world" {
+		t.Fatalf("expected world, got %q ok=%v", text, ok)
+	}
+}
+
+func TestFormatResponseResponsesNonStream(t *testing.T) {
+	store := NewStore("", 24*time.Hour, 3)
+	eng := NewEngine(store, 20480, 500)
+
+	sample := &Sample{Text: "pong", RawResponse: []byte("pong")}
+	resp := eng.FormatResponse(sample, false, "responses", "gpt-5.6-terra")
+	if resp == nil || !resp.Terminate || resp.StatusCode != 200 {
+		t.Fatalf("expected 200 terminate response")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(resp.ResponseBody, &parsed); err != nil {
+		t.Fatalf("responses replay body must be valid JSON: %v", err)
+	}
+	if parsed["object"] != "response" {
+		t.Fatalf("expected object=response, got %v", parsed["object"])
+	}
+	output, _ := parsed["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected 1 output item")
+	}
+	if !strings.Contains(string(resp.ResponseBody), "pong") {
+		t.Fatalf("body missing sample text")
+	}
+}
+
+func TestFormatResponseResponsesStream(t *testing.T) {
+	store := NewStore("", 24*time.Hour, 3)
+	eng := NewEngine(store, 20480, 500)
+
+	sample := &Sample{Text: "pong", RawResponse: []byte("pong")}
+	resp := eng.FormatResponse(sample, true, "responses", "gpt-5.6-terra")
+	if resp == nil || !resp.Terminate {
+		t.Fatalf("expected terminate response")
+	}
+	body := string(resp.ResponseBody)
+	if !strings.Contains(body, "response.created") || !strings.Contains(body, "response.output_text.delta") || !strings.Contains(body, "response.completed") || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("responses SSE missing required events: %s", body)
 	}
 }

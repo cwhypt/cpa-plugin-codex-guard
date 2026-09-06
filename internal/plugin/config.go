@@ -39,8 +39,8 @@ func DefaultConfig() *Config {
 		ProbeCacheTTLStr:    "72h",
 		ProbeStateFile:      "data/cpa-probe-cache-state.json",
 		ProbeMaxInputBytes:  20480, // 20KB
-		ProbeMaxOutputChars: 200,   // 200 字符
-		ProbeMinSamples:     3,     // 至少收集 3 个不同样本后激活
+		ProbeMaxOutputChars: 500,   // 500 字符
+		ProbeMinSamples:     3,     // 至少收集 3 个样本后激活
 	}
 }
 

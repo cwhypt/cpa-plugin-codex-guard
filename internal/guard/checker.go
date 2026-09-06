@@ -165,13 +165,20 @@ func (c *Checker) ObserveResponse(req *types.RequestInterceptRequest) {
 	sessionKeys := extractSessionKeys(headers, root)
 	inputHashes := extractInputHashes(root)
 
+	c.RecordOutcome(sessionKeys, inputHashes, req.StatusCode, respBody)
+}
+
+// RecordOutcome 由 engine 在响应钩子或 request.complete 时调用，统一记录
+// 熔断结果并捕获 thinking_signature_invalid。statusCode==0（上游执行前的
+// 钩子）会被 state.Store 忽略。
+func (c *Checker) RecordOutcome(sessionKeys, inputHashes []string, statusCode int, respBody []byte) {
 	// 1. 记录模糊熔断结果（无论是成功 200 重置，还是连续失败累计）
 	if c.fuzzyCircuitBreaker && len(sessionKeys) > 0 {
-		c.store.RecordResponseOutcome(sessionKeys, inputHashes, req.StatusCode, respBody, c.similarityThreshold)
+		c.store.RecordResponseOutcome(sessionKeys, inputHashes, statusCode, respBody, c.similarityThreshold)
 	}
 
 	// 2. 捕获 thinking_signature_invalid 并持久化记录失效 itemID
-	if req.StatusCode == 400 && len(respBody) > 0 {
+	if statusCode == 400 && len(respBody) > 0 {
 		respBodyStr := string(respBody)
 		matches := signatureErrorRegex.FindStringSubmatch(respBodyStr)
 		if len(matches) >= 2 {
@@ -183,6 +190,17 @@ func (c *Checker) ObserveResponse(req *types.RequestInterceptRequest) {
 			c.store.MarkInvalid(failedItemID, sess, respBody)
 		}
 	}
+}
+
+// ExtractSessionKeys 导出给 engine 在 intercept_before / stream header-init
+// 时预提取会话键（供 request.complete 流式失败观察使用）。
+func ExtractSessionKeys(headers http.Header, root map[string]json.RawMessage) []string {
+	return extractSessionKeys(headers, root)
+}
+
+// ExtractInputHashes 导出给 engine 预提取 input 哈希清单。
+func ExtractInputHashes(root map[string]json.RawMessage) []string {
+	return extractInputHashes(root)
 }
 
 func extractSessionKeys(headers http.Header, root map[string]json.RawMessage) []string {

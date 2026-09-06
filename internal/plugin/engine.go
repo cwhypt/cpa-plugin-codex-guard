@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,7 @@ import (
 
 // debugLog is temporary diagnostic instrumentation (kept per user request).
 func (e *Engine) debugLog(stage, msg string) {
-	f, err := os.OpenFile("/home/cwhypt/cliproxyapi/data/cpa-codex-guard-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filepath.Join("data", "cpa-codex-guard-debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
@@ -36,11 +38,15 @@ type Engine struct {
 }
 
 type pendingInfo struct {
-	hash     string
-	model    string
-	format   string
-	isStream bool
-	seenAt   time.Time
+	hash        string
+	model       string
+	format      string
+	isStream    bool
+	seenAt      time.Time
+	sessionKeys []string
+	inputHashes []string
+	// streamText accumulates SSE delta text while the stream is in flight.
+	streamText strings.Builder
 }
 
 func NewEngine() *Engine {
@@ -98,6 +104,8 @@ func (e *Engine) HandleMethod(method string, request []byte) ([]byte, error) {
 		return e.handleRequestInterceptAfter(request)
 	case types.MethodResponseInterceptAfter:
 		return e.handleResponseInterceptAfter(request)
+	case types.MethodResponseInterceptStreamChunk:
+		return e.handleStreamChunk(request)
 	case types.MethodRequestComplete:
 		return e.handleRequestComplete(request)
 	default:
@@ -136,6 +144,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 			RequestInterceptor:     true,
 			ResponseInterceptor:    true,
 			RequestLifecyclePlugin: true,
+			StreamChunkInterceptor: true,
 		},
 	}
 
@@ -175,6 +184,7 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	reqBody := req.GetRequestBody()
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
 		hash, eligible, isStream, format := probeEng.ComputeInputHash(reqBody)
+		e.debugLog("before", fmt.Sprintf("reqId=%s model=%s stream=%v bodyLen=%d eligible=%v hash=%s format=%s", req.RequestID, req.Model, req.Stream, len(reqBody), eligible, hash[:min(len(hash), 12)], format))
 		if eligible && hash != "" {
 			if sample, hit := probeEng.Store().GetRandomSample(hash); hit {
 				e.debugLog("before", fmt.Sprintf("CACHE_HIT hash=%s reqId=%s", hash, req.RequestID))
@@ -190,13 +200,20 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 				}
 			}
 			if req.RequestID != "" {
+				// Track session keys / input hashes so request.complete can still
+				// observe failures for streaming requests (which never reach the
+				// response interceptor).
+				root := map[string]json.RawMessage{}
+				_ = json.Unmarshal(reqBody, &root)
 				e.pendingMu.Lock()
 				e.pending[req.RequestID] = pendingInfo{
-					hash:     hash,
-					model:    req.Model,
-					format:   format,
-					isStream: isStream,
-					seenAt:   time.Now(),
+					hash:        hash,
+					model:       req.Model,
+					format:      format,
+					isStream:    isStream,
+					seenAt:      time.Now(),
+					sessionKeys: guard.ExtractSessionKeys(req.GetHeaders(), root),
+					inputHashes: guard.ExtractInputHashes(root),
 				}
 				e.pendingMu.Unlock()
 			}
@@ -207,28 +224,16 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 }
 
 // handleRequestInterceptAfter fires after credential selection, before upstream
-// execution. Its Body is the rewritten upstream payload — NOT a response. No
-// sample collection happens here.
+// execution. Its Body is the rewritten upstream payload — NOT a response. There
+// is no response data available here, so nothing is observed or recorded.
 func (e *Engine) handleRequestInterceptAfter(request []byte) ([]byte, error) {
-	var req types.RequestInterceptRequest
-	if len(request) > 0 {
-		if err := json.Unmarshal(request, &req); err != nil {
-			return e.okEmptyResponse()
-		}
-	}
-
-	e.mu.RLock()
-	checker := e.checker
-	e.mu.RUnlock()
-
-	checker.ObserveResponse(&req)
 	return e.okEmptyResponse()
 }
 
 // handleResponseInterceptAfter fires only for successful non-streaming
 // upstream responses (StatusCode=200). Body is the upstream response body and
 // RequestBody is the exact payload sent upstream — this is the authoritative
-// sample collection point.
+// sample collection point for non-streaming traffic.
 func (e *Engine) handleResponseInterceptAfter(request []byte) ([]byte, error) {
 	var req types.RequestInterceptRequest
 	if len(request) > 0 {
@@ -246,16 +251,25 @@ func (e *Engine) handleResponseInterceptAfter(request []byte) ([]byte, error) {
 	checker.ObserveResponse(&req)
 
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && req.StatusCode >= 200 && req.StatusCode < 300 {
-		reqBody := req.GetRequestBody()
+		// Hash 必须基于客户端原始请求（OriginalRequest），与 intercept_before
+		// 的命中查询保持同一基准；上游 payload 可能被转换/注入额外字段。
+		reqBody := req.OriginalRequest
+		if len(reqBody) == 0 {
+			reqBody = req.GetRequestBody()
+		}
 		respBody := req.GetResponseBody()
 		if len(reqBody) > 0 && len(respBody) > 0 {
 			hash, eligible, _, format := probeEng.ComputeInputHash(reqBody)
+			text, textOK := probeEng.ExtractOutputText(format, respBody)
+			e.debugLog("collect", fmt.Sprintf("reqId=%s status=%d reqBodyLen=%d respBodyLen=%d hash=%s eligible=%v format=%s textOK=%v textLen=%d", req.RequestID, req.StatusCode, len(reqBody), len(respBody), hash[:min(len(hash), 12)], eligible, format, textOK, len([]rune(text))))
 			if eligible && hash != "" {
-				if text, ok := probeEng.ExtractOutputText(format, respBody); ok {
+				if textOK {
 					probeEng.Store().AddSample(hash, req.Model, format, text, respBody)
 					e.debugLog("collect", fmt.Sprintf("sample hash=%s model=%s textLen=%d reqId=%s", hash, req.Model, len([]rune(text)), req.RequestID))
 				}
 			}
+		} else {
+			e.debugLog("collect", fmt.Sprintf("reqId=%s status=%d EMPTY body reqBodyLen=%d respBodyLen=%d", req.RequestID, req.StatusCode, len(reqBody), len(respBody)))
 		}
 	}
 
@@ -269,8 +283,10 @@ func (e *Engine) handleResponseInterceptAfter(request []byte) ([]byte, error) {
 }
 
 // handleRequestComplete is the terminal lifecycle event for every request,
-// success or failure. It exists to evict pending entries for failed requests
-// so they never leak; success cleanup normally happens in the response hook.
+// success or failure. For streaming requests it is the only point where the
+// final status is known, so failure recording and stream sample collection
+// both happen here. Success cleanup for non-streaming normally happens in the
+// response hook.
 func (e *Engine) handleRequestComplete(request []byte) ([]byte, error) {
 	var completion types.RequestCompletion
 	if len(request) > 0 {
@@ -281,17 +297,130 @@ func (e *Engine) handleRequestComplete(request []byte) ([]byte, error) {
 
 	e.debugLog("complete", fmt.Sprintf("reqId=%s outcome=%s status=%d err=%s", completion.RequestID, completion.Outcome, completion.StatusCode, completion.Error))
 
-	if completion.RequestID != "" {
-		e.pendingMu.Lock()
-		delete(e.pending, completion.RequestID)
-		e.pendingMu.Unlock()
+	if completion.RequestID == "" {
+		return e.okEmptyResponse()
+	}
+
+	e.pendingMu.Lock()
+	p, hasPending := e.pending[reqKey(completion.RequestID)]
+	delete(e.pending, completion.RequestID)
+	e.pendingMu.Unlock()
+
+	if !hasPending {
+		return e.okEmptyResponse()
+	}
+
+	e.mu.RLock()
+	checker := e.checker
+	e.mu.RUnlock()
+
+	// request.complete 是流式请求唯一能观察到最终状态的钩子；同时兜底
+	// 非流式失败（response.intercept_after 只对成功响应触发）。
+	switch {
+	case completion.Outcome == types.OutcomeSucceeded && completion.StatusCode >= 200 && completion.StatusCode < 300:
+		checker.RecordOutcome(p.sessionKeys, p.inputHashes, completion.StatusCode, nil)
+		if p.isStream {
+			e.collectStreamSample(completion.RequestID, p)
+		}
+	case completion.Outcome == types.OutcomeFailed && completion.StatusCode != 0:
+		checker.RecordOutcome(p.sessionKeys, p.inputHashes, completion.StatusCode, []byte(completion.Error))
 	}
 
 	return e.okEmptyResponse()
 }
 
+// reqKey normalizes the pending-map key.
+func reqKey(id string) string { return id }
+
+// handleStreamChunk observes successful streaming responses. ChunkIndex ==
+// StreamChunkHeaderInitIndex carries the request body (schema v3); payload
+// chunks carry the SSE frame. Samples are collected on request.complete using
+// the accumulated text, keyed by the pending map entry.
+func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
+	var req types.StreamChunkInterceptRequest
+	if len(request) > 0 {
+		if err := json.Unmarshal(request, &req); err != nil {
+			return e.okStreamResponse(nil, false)
+		}
+	}
+
+	e.mu.RLock()
+	probeEng := e.probeEngine
+	cfg := e.cfg
+	e.mu.RUnlock()
+
+	if req.ChunkIndex == types.StreamChunkHeaderInitIndex {
+		// Header-init: ensure a pending entry exists even if intercept_before
+		// skipped it (e.g. probe cache disabled then re-enabled mid-flight).
+		if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.RequestBody) > 0 {
+			hash, eligible, isStream, format := probeEng.ComputeInputHash(req.RequestBody)
+			if eligible && hash != "" {
+				e.pendingMu.Lock()
+				if _, ok := e.pending[req.RequestID]; !ok {
+					root := map[string]json.RawMessage{}
+					_ = json.Unmarshal(req.RequestBody, &root)
+					e.pending[req.RequestID] = pendingInfo{
+						hash:        hash,
+						model:       req.Model,
+						format:      format,
+						isStream:    isStream,
+						seenAt:      time.Now(),
+						sessionKeys: guard.ExtractSessionKeys(req.RequestHeaders, root),
+						inputHashes: guard.ExtractInputHashes(root),
+					}
+				}
+				e.pendingMu.Unlock()
+			}
+		}
+		return e.okStreamResponse(nil, false)
+	}
+
+	// Payload chunk: accumulate SSE delta text into the pending entry.
+	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.Body) > 0 {
+		e.pendingMu.Lock()
+		if p, ok := e.pending[req.RequestID]; ok {
+			p.streamText.Write(req.Body)
+			p.seenAt = time.Now()
+			e.pending[req.RequestID] = p
+		}
+		e.pendingMu.Unlock()
+	}
+
+	return e.okStreamResponse(nil, false)
+}
+
+// collectStreamSample finalizes a streaming sample when the request completes
+// successfully. Only called from handleRequestComplete for succeeded streams.
+func (e *Engine) collectStreamSample(reqID string, p pendingInfo) {
+	e.mu.RLock()
+	probeEng := e.probeEngine
+	cfg := e.cfg
+	e.mu.RUnlock()
+
+	if !cfg.IsProbeCacheEnabled() || probeEng == nil {
+		return
+	}
+
+	chunks := [][]byte{[]byte(p.streamText.String())}
+	text, ok := probeEng.ExtractStreamText(p.format, chunks)
+	e.debugLog("stream-collect", fmt.Sprintf("reqId=%s hash=%s format=%s textOK=%v textLen=%d", reqID, p.hash[:min(len(p.hash), 12)], p.format, ok, len([]rune(text))))
+	if !ok {
+		return
+	}
+	probeEng.Store().AddSample(p.hash, p.model, p.format, text, []byte(text))
+	e.debugLog("stream-collect", fmt.Sprintf("sample hash=%s model=%s textLen=%d reqId=%s", p.hash, p.model, len([]rune(text)), reqID))
+}
+
 func (e *Engine) okEmptyResponse() ([]byte, error) {
 	resBytes, _ := json.Marshal(types.RequestInterceptResponse{})
+	return json.Marshal(types.Envelope{
+		OK:     true,
+		Result: resBytes,
+	})
+}
+
+func (e *Engine) okStreamResponse(body []byte, drop bool) ([]byte, error) {
+	resBytes, _ := json.Marshal(types.StreamChunkInterceptResponse{Body: body, DropChunk: drop})
 	return json.Marshal(types.Envelope{
 		OK:     true,
 		Result: resBytes,
