@@ -7,18 +7,20 @@ import (
 
 const (
 	ABIVersion    uint32 = 1
-	SchemaVersion uint32 = 1
+	SchemaVersion uint32 = 3
 
 	PluginID   = "cpa-codex-guard"
 	PluginName = "CPA Codex Guard"
-	Version    = "0.1.0"
+	Version    = "0.2.0"
 
 	MethodPluginRegister    = "plugin.register"
 	MethodPluginReconfigure = "plugin.reconfigure"
+	MethodPluginShutdown    = "plugin.shutdown"
 
-	MethodRequestInterceptBefore  = "request.intercept_before"
-	MethodRequestInterceptAfter   = "request.intercept_after"
-	MethodResponseInterceptAfter  = "response.intercept_after"
+	MethodRequestInterceptBefore = "request.intercept_before"
+	MethodRequestInterceptAfter  = "request.intercept_after"
+	MethodResponseInterceptAfter = "response.intercept_after"
+	MethodRequestComplete        = "request.complete"
 )
 
 type Envelope struct {
@@ -57,8 +59,9 @@ type ConfigField struct {
 }
 
 type Capabilities struct {
-	RequestInterceptor  bool `json:"request_interceptor"`
-	ResponseInterceptor bool `json:"response_interceptor"`
+	RequestInterceptor     bool `json:"request_interceptor"`
+	ResponseInterceptor    bool `json:"response_interceptor"`
+	RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
 }
 
 type LifecycleRequest struct {
@@ -112,4 +115,19 @@ type RequestInterceptResponse struct {
 	Body            []byte      `json:"Body,omitempty"`
 	Headers         http.Header `json:"Headers,omitempty"`
 	ClearHeaders    []string    `json:"ClearHeaders,omitempty"`
+}
+
+// RequestCompletion mirrors pluginapi.RequestCompletion (schema v3, no json tags:
+// fields marshal with Go field names).
+type RequestCompletion struct {
+	RequestID      string         `json:"RequestID"`
+	TraceID        string         `json:"TraceID"`
+	SourceFormat   string         `json:"SourceFormat"`
+	Model          string         `json:"Model"`
+	RequestedModel string         `json:"RequestedModel"`
+	Stream         bool           `json:"Stream"`
+	Outcome        string         `json:"Outcome"`
+	StatusCode     int            `json:"StatusCode"`
+	Error          string         `json:"Error"`
+	Metadata       map[string]any `json:"Metadata"`
 }

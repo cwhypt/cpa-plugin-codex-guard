@@ -18,14 +18,14 @@ type Sample struct {
 }
 
 type ProbeEntry struct {
-	InputHash  string    `json:"input_hash"`
-	Model      string    `json:"model"`
-	Format     string    `json:"format"`
-	CreatedAt  time.Time `json:"created_at"`
-	ExpireAt   time.Time `json:"expire_at"`
-	Activated  bool      `json:"activated"`
-	HitCount   int       `json:"hit_count"`
-	Samples    []Sample  `json:"samples"`
+	InputHash string    `json:"input_hash"`
+	Model     string    `json:"model"`
+	Format    string    `json:"format"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpireAt  time.Time `json:"expire_at"`
+	Activated bool      `json:"activated"`
+	HitCount  int       `json:"hit_count"`
+	Samples   []Sample  `json:"samples"`
 }
 
 type StateData struct {
@@ -100,6 +100,19 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 	_ = s.saveLocked()
 
 	return entry.Activated
+}
+
+// PeekSamples returns the stored samples for an input hash regardless of
+// activation state (test/inspection helper).
+func (s *Store) PeekSamples(inputHash string) ([]Sample, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entry, ok := s.entries[inputHash]
+	if !ok {
+		return nil, false
+	}
+	return entry.Samples, true
 }
 
 func (s *Store) GetRandomSample(inputHash string) (*Sample, bool) {

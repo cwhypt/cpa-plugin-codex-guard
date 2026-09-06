@@ -15,12 +15,12 @@ type Config struct {
 	SimilarityThreshold    float64 `json:"fuzzy_similarity_threshold" yaml:"fuzzy_similarity_threshold"`
 
 	// 测活流量智能缓存配置
-	ProbeCacheEnabled  *bool  `json:"probe_cache_enabled" yaml:"probe_cache_enabled"`
-	ProbeCacheTTLStr   string `json:"probe_cache_ttl" yaml:"probe_cache_ttl"`
-	ProbeStateFile     string `json:"probe_state_file" yaml:"probe_state_file"`
-	ProbeMaxInputBytes int    `json:"probe_max_input_bytes" yaml:"probe_max_input_bytes"`
-	ProbeMaxOutputChars int   `json:"probe_max_output_chars" yaml:"probe_max_output_chars"`
-	ProbeMinSamples    int    `json:"probe_min_samples" yaml:"probe_min_samples"`
+	ProbeCacheEnabled   *bool  `json:"probe_cache_enabled" yaml:"probe_cache_enabled"`
+	ProbeCacheTTLStr    string `json:"probe_cache_ttl" yaml:"probe_cache_ttl"`
+	ProbeStateFile      string `json:"probe_state_file" yaml:"probe_state_file"`
+	ProbeMaxInputBytes  int    `json:"probe_max_input_bytes" yaml:"probe_max_input_bytes"`
+	ProbeMaxOutputChars int    `json:"probe_max_output_chars" yaml:"probe_max_output_chars"`
+	ProbeMinSamples     int    `json:"probe_min_samples" yaml:"probe_min_samples"`
 }
 
 func DefaultConfig() *Config {

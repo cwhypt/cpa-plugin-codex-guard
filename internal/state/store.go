@@ -19,12 +19,12 @@ type InvalidItem struct {
 }
 
 type SessionCircuit struct {
-	SessionKey   string          `json:"session_key"`
-	ErrorCount   int             `json:"error_count"`
-	LastInputHashes []string     `json:"last_input_hashes"`
-	LastStatusCode  int          `json:"last_status_code"`
+	SessionKey       string          `json:"session_key"`
+	ErrorCount       int             `json:"error_count"`
+	LastInputHashes  []string        `json:"last_input_hashes"`
+	LastStatusCode   int             `json:"last_status_code"`
 	LastErrorPayload json.RawMessage `json:"last_error_payload"`
-	CircuitExpireAt time.Time    `json:"circuit_expire_at,omitempty"`
+	CircuitExpireAt  time.Time       `json:"circuit_expire_at,omitempty"`
 }
 
 type StateData struct {
@@ -35,13 +35,13 @@ type StateData struct {
 }
 
 type Store struct {
-	mu             sync.RWMutex
-	filePath       string
-	ttl            time.Duration
-	circuitTTL     time.Duration
-	items          map[string]InvalidItem
-	circuits       map[string]SessionCircuit
-	isDirty        bool
+	mu         sync.RWMutex
+	filePath   string
+	ttl        time.Duration
+	circuitTTL time.Duration
+	items      map[string]InvalidItem
+	circuits   map[string]SessionCircuit
+	isDirty    bool
 }
 
 func NewStore(filePath string, ttl, circuitTTL time.Duration) *Store {

@@ -14,6 +14,7 @@ import (
 	"cpa-codex-guard/internal/types"
 )
 
+// debugLog is temporary diagnostic instrumentation (kept per user request).
 func (e *Engine) debugLog(stage, msg string) {
 	f, err := os.OpenFile("/home/cwhypt/cliproxyapi/data/cpa-codex-guard-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -39,11 +40,14 @@ type pendingInfo struct {
 	model    string
 	format   string
 	isStream bool
-	reqBody  []byte
+	seenAt   time.Time
 }
 
 func NewEngine() *Engine {
-	cfg := DefaultConfig()
+	return newEngineWithConfig(DefaultConfig())
+}
+
+func newEngineWithConfig(cfg *Config) *Engine {
 	store := state.NewStore(cfg.StateFile, cfg.ParseTTL(), cfg.ParseCircuitTTL())
 	checker := guard.NewChecker(
 		store,
@@ -57,12 +61,30 @@ func NewEngine() *Engine {
 	probeStore := probecache.NewStore(cfg.ProbeStateFile, cfg.ParseProbeTTL(), cfg.ProbeMinSamples)
 	probeEngine := probecache.NewEngine(probeStore, cfg.ProbeMaxInputBytes, cfg.ProbeMaxOutputChars)
 
-	return &Engine{
+	e := &Engine{
 		cfg:         cfg,
 		store:       store,
 		checker:     checker,
 		probeEngine: probeEngine,
 		pending:     make(map[string]pendingInfo),
+	}
+	go e.pendingJanitor()
+	return e
+}
+
+// pendingJanitor evicts stale pending entries whose request.complete never
+// arrived (host restart, fused plugin, lifecycle delivery failure).
+func (e *Engine) pendingJanitor() {
+	ticker := time.NewTicker(10 * time.Minute)
+	for range ticker.C {
+		cutoff := time.Now().Add(-1 * time.Hour)
+		e.pendingMu.Lock()
+		for k, v := range e.pending {
+			if v.seenAt.Before(cutoff) {
+				delete(e.pending, k)
+			}
+		}
+		e.pendingMu.Unlock()
 	}
 }
 
@@ -72,9 +94,12 @@ func (e *Engine) HandleMethod(method string, request []byte) ([]byte, error) {
 		return e.handleRegister(request)
 	case types.MethodRequestInterceptBefore:
 		return e.handleInterceptBefore(request)
-	case types.MethodRequestInterceptAfter, types.MethodResponseInterceptAfter:
-		e.debugLog("dispatch", "method="+method+" reqLen="+fmt.Sprintf("%d", len(request)))
-		return e.handleInterceptAfter(request, method)
+	case types.MethodRequestInterceptAfter:
+		return e.handleRequestInterceptAfter(request)
+	case types.MethodResponseInterceptAfter:
+		return e.handleResponseInterceptAfter(request)
+	case types.MethodRequestComplete:
+		return e.handleRequestComplete(request)
 	default:
 		return json.Marshal(types.Envelope{
 			OK: false,
@@ -108,8 +133,9 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 			},
 		},
 		Capabilities: types.Capabilities{
-			RequestInterceptor:  true,
-			ResponseInterceptor: true,
+			RequestInterceptor:     true,
+			ResponseInterceptor:    true,
+			RequestLifecyclePlugin: true,
 		},
 	}
 
@@ -134,7 +160,6 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	cfg := e.cfg
 	e.mu.RUnlock()
 
-	// 1. 先进行 Guard 规则检查 (max_turns, thinking_signature, fuzzy circuit breaker, auto-fix)
 	res := checker.CheckRequest(&req)
 	if res != nil {
 		resBytes, err := json.Marshal(res)
@@ -147,12 +172,12 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 		})
 	}
 
-	// 2. 若未被拦截，检查测活缓存命中 (probe cache)
 	reqBody := req.GetRequestBody()
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
 		hash, eligible, isStream, format := probeEng.ComputeInputHash(reqBody)
 		if eligible && hash != "" {
 			if sample, hit := probeEng.Store().GetRandomSample(hash); hit {
+				e.debugLog("before", fmt.Sprintf("CACHE_HIT hash=%s reqId=%s", hash, req.RequestID))
 				probeResp := probeEng.FormatResponse(sample, isStream, format, req.Model)
 				if probeResp != nil {
 					resBytes, err := json.Marshal(probeResp)
@@ -164,22 +189,47 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 					}
 				}
 			}
-			e.pendingMu.Lock()
-			e.pending[req.RequestID] = pendingInfo{
-				hash:     hash,
-				model:    req.Model,
-				format:   format,
-				isStream: isStream,
-				reqBody:  reqBody,
+			if req.RequestID != "" {
+				e.pendingMu.Lock()
+				e.pending[req.RequestID] = pendingInfo{
+					hash:     hash,
+					model:    req.Model,
+					format:   format,
+					isStream: isStream,
+					seenAt:   time.Now(),
+				}
+				e.pendingMu.Unlock()
 			}
-			e.pendingMu.Unlock()
 		}
 	}
 
 	return e.okEmptyResponse()
 }
 
-func (e *Engine) handleInterceptAfter(request []byte, method string) ([]byte, error) {
+// handleRequestInterceptAfter fires after credential selection, before upstream
+// execution. Its Body is the rewritten upstream payload — NOT a response. No
+// sample collection happens here.
+func (e *Engine) handleRequestInterceptAfter(request []byte) ([]byte, error) {
+	var req types.RequestInterceptRequest
+	if len(request) > 0 {
+		if err := json.Unmarshal(request, &req); err != nil {
+			return e.okEmptyResponse()
+		}
+	}
+
+	e.mu.RLock()
+	checker := e.checker
+	e.mu.RUnlock()
+
+	checker.ObserveResponse(&req)
+	return e.okEmptyResponse()
+}
+
+// handleResponseInterceptAfter fires only for successful non-streaming
+// upstream responses (StatusCode=200). Body is the upstream response body and
+// RequestBody is the exact payload sent upstream — this is the authoritative
+// sample collection point.
+func (e *Engine) handleResponseInterceptAfter(request []byte) ([]byte, error) {
 	var req types.RequestInterceptRequest
 	if len(request) > 0 {
 		if err := json.Unmarshal(request, &req); err != nil {
@@ -195,43 +245,46 @@ func (e *Engine) handleInterceptAfter(request []byte, method string) ([]byte, er
 
 	checker.ObserveResponse(&req)
 
-	if cfg.IsProbeCacheEnabled() && probeEng != nil && req.RequestID != "" {
+	if cfg.IsProbeCacheEnabled() && probeEng != nil && req.StatusCode >= 200 && req.StatusCode < 300 {
+		reqBody := req.GetRequestBody()
+		respBody := req.GetResponseBody()
+		if len(reqBody) > 0 && len(respBody) > 0 {
+			hash, eligible, _, format := probeEng.ComputeInputHash(reqBody)
+			if eligible && hash != "" {
+				if text, ok := probeEng.ExtractOutputText(format, respBody); ok {
+					probeEng.Store().AddSample(hash, req.Model, format, text, respBody)
+					e.debugLog("collect", fmt.Sprintf("sample hash=%s model=%s textLen=%d reqId=%s", hash, req.Model, len([]rune(text)), req.RequestID))
+				}
+			}
+		}
+	}
+
+	if req.RequestID != "" {
 		e.pendingMu.Lock()
-		pi, found := e.pending[req.RequestID]
 		delete(e.pending, req.RequestID)
 		e.pendingMu.Unlock()
+	}
 
-		if found && pi.hash != "" && pi.format == "chat_completions" {
-			nowUnix := time.Now().Unix()
-			textSnippet := "probe_response_cached"
-			if len(pi.reqBody) > 0 {
-				textSnippet = fmt.Sprintf("cached:%d:%s", len(pi.reqBody), pi.format)
-			}
-			syntheticResponse := map[string]any{
-				"id":      fmt.Sprintf("chatcmpl-probe-%d", nowUnix),
-				"object":  "chat.completion",
-				"created": nowUnix,
-				"model":   pi.model,
-				"choices": []any{
-					map[string]any{
-						"index": 0,
-						"message": map[string]any{
-							"role":    "assistant",
-							"content": textSnippet,
-						},
-						"finish_reason":        "stop",
-						"native_finish_reason": "stop",
-					},
-				},
-				"usage": map[string]any{
-					"prompt_tokens":     10,
-					"completion_tokens": 5,
-					"total_tokens":      15,
-				},
-			}
-			rawResp, _ := json.Marshal(syntheticResponse)
-			probeEng.Store().AddSample(pi.hash, pi.model, pi.format, textSnippet, rawResp)
+	return e.okEmptyResponse()
+}
+
+// handleRequestComplete is the terminal lifecycle event for every request,
+// success or failure. It exists to evict pending entries for failed requests
+// so they never leak; success cleanup normally happens in the response hook.
+func (e *Engine) handleRequestComplete(request []byte) ([]byte, error) {
+	var completion types.RequestCompletion
+	if len(request) > 0 {
+		if err := json.Unmarshal(request, &completion); err != nil {
+			return e.okEmptyResponse()
 		}
+	}
+
+	e.debugLog("complete", fmt.Sprintf("reqId=%s outcome=%s status=%d err=%s", completion.RequestID, completion.Outcome, completion.StatusCode, completion.Error))
+
+	if completion.RequestID != "" {
+		e.pendingMu.Lock()
+		delete(e.pending, completion.RequestID)
+		e.pendingMu.Unlock()
 	}
 
 	return e.okEmptyResponse()
