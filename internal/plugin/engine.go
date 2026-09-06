@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,10 +17,10 @@ import (
 )
 
 // debugLog is temporary diagnostic instrumentation (kept per user request).
-// Absolute path on purpose: relative "data/..." only resolves because the
-// systemd unit sets WorkingDirectory=/home/cwhypt/cliproxyapi.
+// Relative "data/..." on purpose: resolves against the CPA process working
+// directory, keeping the plugin portable across platforms/installs.
 func (e *Engine) debugLog(stage, msg string) {
-	f, err := os.OpenFile("/home/cwhypt/cliproxyapi/data/cpa-codex-guard-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filepath.Join("data", "cpa-codex-guard-debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
