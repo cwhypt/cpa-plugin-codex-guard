@@ -49,6 +49,8 @@ type pendingInfo struct {
 	inputHashes []string
 	// streamText accumulates SSE delta text while the stream is in flight.
 	streamText strings.Builder
+	// chunkCount tracks how many SSE data frames were seen (diagnostics).
+	chunkCount int
 }
 
 func NewEngine() *Engine {
@@ -356,6 +358,7 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 		// skipped it (e.g. probe cache disabled then re-enabled mid-flight).
 		if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.RequestBody) > 0 {
 			hash, eligible, isStream, format := probeEng.ComputeInputHash(req.RequestBody)
+			e.debugLog("stream-init", fmt.Sprintf("reqId=%s eligible=%v hash=%s format=%s", req.RequestID, eligible, hash[:min(len(hash), 12)], format))
 			if eligible && hash != "" {
 				e.pendingMu.Lock()
 				if _, ok := e.pending[req.RequestID]; !ok {
@@ -380,12 +383,21 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 	// Payload chunk: accumulate SSE delta text into the pending entry.
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.Body) > 0 {
 		e.pendingMu.Lock()
-		if p, ok := e.pending[req.RequestID]; ok {
+		p, ok := e.pending[req.RequestID]
+		if ok {
+			chunkCount := strings.Count(string(req.Body), "data:")
 			p.streamText.Write(req.Body)
+			// Each chunk is a bare SSE frame without a trailing blank line;
+			// append the SSE frame separator so frames never concatenate.
+			p.streamText.WriteString("\n\n")
 			p.seenAt = time.Now()
+			p.chunkCount += chunkCount
 			e.pending[req.RequestID] = p
 		}
 		e.pendingMu.Unlock()
+		if !ok {
+			e.debugLog("stream-chunk", fmt.Sprintf("reqId=%s NO PENDING ENTRY bodyLen=%d", req.RequestID, len(req.Body)))
+		}
 	}
 
 	return e.okStreamResponse(nil, false)
@@ -405,8 +417,13 @@ func (e *Engine) collectStreamSample(reqID string, p pendingInfo) {
 
 	chunks := [][]byte{[]byte(p.streamText.String())}
 	text, ok := probeEng.ExtractStreamText(p.format, chunks)
-	e.debugLog("stream-collect", fmt.Sprintf("reqId=%s hash=%s format=%s textOK=%v textLen=%d", reqID, p.hash[:min(len(p.hash), 12)], p.format, ok, len([]rune(text))))
+	e.debugLog("stream-collect", fmt.Sprintf("reqId=%s hash=%s format=%s rawBytes=%d chunks=%d textOK=%v textLen=%d", reqID, p.hash[:min(len(p.hash), 12)], p.format, p.streamText.Len(), p.chunkCount, ok, len([]rune(text))))
 	if !ok {
+		raw := p.streamText.String()
+		if len(raw) > 300 {
+			raw = raw[:300]
+		}
+		e.debugLog("stream-collect", fmt.Sprintf("EMPTY_TEXT reqId=%s raw=%q", reqID, raw))
 		return
 	}
 	probeEng.Store().AddSample(p.hash, p.model, p.format, text, []byte(text))

@@ -158,13 +158,18 @@ func (e *Engine) ExtractOutputText(format string, respBody []byte) (text string,
 
 // ExtractStreamText 从流式 SSE chunk 历史中拼接纯文本输出并校验长度限制。
 // 支持 chat.completion.chunk delta 与 responses event SSE 两种格式。
+// 同时容忍 frame 间缺少空行分隔的紧凑 SSE（event:/data: 行直接相连）。
 func (e *Engine) ExtractStreamText(format string, chunks [][]byte) (text string, eligible bool) {
 	if len(chunks) == 0 {
 		return "", false
 	}
 
 	for _, chunk := range chunks {
-		for _, line := range strings.Split(string(chunk), "\n") {
+		s := string(chunk)
+		// 规范化：确保 event:/data: 行各自独立，即使原始帧缺失分隔符
+		s = strings.ReplaceAll(s, "event:", "\nevent:")
+		s = strings.ReplaceAll(s, "data:", "\ndata:")
+		for _, line := range strings.Split(s, "\n") {
 			line = strings.TrimSpace(line)
 			if !strings.HasPrefix(line, "data:") {
 				continue
@@ -194,7 +199,11 @@ func (e *Engine) ExtractStreamText(format string, chunks [][]byte) (text string,
 				if t, ok := ev["delta"].(string); ok {
 					text += t
 				} else if resp, ok := ev["response"].(map[string]any); ok {
-					text += extractResponsesOutputText(resp)
+					// response.completed 携带全文：重置累计，避免与 delta 重复
+					full := extractResponsesOutputText(resp)
+					if full != "" {
+						text = full
+					}
 				}
 			default:
 				if t, ok := ev["delta"].(string); ok {

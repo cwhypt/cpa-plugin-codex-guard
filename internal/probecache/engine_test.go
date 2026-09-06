@@ -200,3 +200,20 @@ func TestFormatResponseResponsesStream(t *testing.T) {
 		t.Fatalf("responses SSE missing required events: %s", body)
 	}
 }
+
+func TestExtractStreamTextCompactSSEWithoutSeparators(t *testing.T) {
+	store := NewStore("", 24*time.Hour, 3)
+	eng := NewEngine(store, 20480, 500)
+
+	// ??????:?? chunk ?? SSE frame,Write ??????,
+	// ?? "event: response.createddata: {...}" ??
+	compact := "event: response.created" + "data: {\"type\":\"response.created\"}\n\n" +
+		"event: response.output_text.delta" + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"he\"}\n\n" +
+		"event: response.output_text.delta" + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}\n\n" +
+		"data: [DONE]\n\n"
+
+	text, ok := eng.ExtractStreamText("responses", [][]byte{[]byte(compact)})
+	if !ok || text != "hello" {
+		t.Fatalf("expected hello from compact SSE, got %q ok=%v", text, ok)
+	}
+}
