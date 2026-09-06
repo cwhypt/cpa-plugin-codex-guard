@@ -39,13 +39,18 @@ func NewChecker(store *state.Store, blockMaxTurns, blockInvalidSignatures, autoF
 
 // CheckRequest 在 request.intercept_before 钩子中执行
 func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.RequestInterceptResponse {
-	if req == nil || len(req.Body) == 0 {
+	if req == nil {
 		return nil
 	}
+	body := req.GetRequestBody()
+	if len(body) == 0 {
+		return nil
+	}
+	headers := req.GetHeaders()
 
-	hasMaxTurnsStr := c.blockMaxTurns && containsSubslice(req.Body, []byte(`"max_turns"`))
-	hasReasoningStr := c.blockInvalidSignatures && (containsSubslice(req.Body, []byte(`"reasoning"`)) || containsSubslice(req.Body, []byte(`"rs_`)))
-	isResponsesLite := c.autoFixResponsesLite && isResponsesLiteHeader(req.Headers)
+	hasMaxTurnsStr := c.blockMaxTurns && containsSubslice(body, []byte(`"max_turns"`))
+	hasReasoningStr := c.blockInvalidSignatures && (containsSubslice(body, []byte(`"reasoning"`)) || containsSubslice(body, []byte(`"rs_`)))
+	isResponsesLite := c.autoFixResponsesLite && isResponsesLiteHeader(headers)
 
 	// 如果没有特殊匹配且未开熔断，快速放行
 	if !hasMaxTurnsStr && !hasReasoningStr && !isResponsesLite && !c.fuzzyCircuitBreaker {
@@ -53,7 +58,7 @@ func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.Reques
 	}
 
 	var root map[string]json.RawMessage
-	if err := json.Unmarshal(req.Body, &root); err != nil {
+	if err := json.Unmarshal(body, &root); err != nil {
 		return nil
 	}
 
@@ -148,27 +153,26 @@ func (c *Checker) ObserveResponse(req *types.RequestInterceptRequest) {
 		return
 	}
 
-	reqBody := req.Body
-	if len(reqBody) == 0 && len(req.ResponseBody) > 0 {
-		// 某些 ResponseIntercept 结构可能会分别存放在不同的字段
-	}
+	reqBody := req.GetRequestBody()
+	respBody := req.GetResponseBody()
+	headers := req.GetHeaders()
 
 	var root map[string]json.RawMessage
 	if len(reqBody) > 0 {
 		_ = json.Unmarshal(reqBody, &root)
 	}
 
-	sessionKeys := extractSessionKeys(req.Headers, root)
+	sessionKeys := extractSessionKeys(headers, root)
 	inputHashes := extractInputHashes(root)
 
 	// 1. 记录模糊熔断结果（无论是成功 200 重置，还是连续失败累计）
 	if c.fuzzyCircuitBreaker && len(sessionKeys) > 0 {
-		c.store.RecordResponseOutcome(sessionKeys, inputHashes, req.StatusCode, req.ResponseBody, c.similarityThreshold)
+		c.store.RecordResponseOutcome(sessionKeys, inputHashes, req.StatusCode, respBody, c.similarityThreshold)
 	}
 
 	// 2. 捕获 thinking_signature_invalid 并持久化记录失效 itemID
-	if req.StatusCode == 400 && len(req.ResponseBody) > 0 {
-		respBodyStr := string(req.ResponseBody)
+	if req.StatusCode == 400 && len(respBody) > 0 {
+		respBodyStr := string(respBody)
 		matches := signatureErrorRegex.FindStringSubmatch(respBodyStr)
 		if len(matches) >= 2 {
 			failedItemID := matches[1]
@@ -176,7 +180,7 @@ func (c *Checker) ObserveResponse(req *types.RequestInterceptRequest) {
 			if len(sessionKeys) > 0 {
 				sess = sessionKeys[0]
 			}
-			c.store.MarkInvalid(failedItemID, sess, req.ResponseBody)
+			c.store.MarkInvalid(failedItemID, sess, respBody)
 		}
 	}
 }

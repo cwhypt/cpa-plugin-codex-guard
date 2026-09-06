@@ -74,11 +74,34 @@ type RequestInterceptRequest struct {
 	RequestedModel  string         `json:"RequestedModel,omitempty"`
 	Stream          bool           `json:"Stream,omitempty"`
 	Headers         http.Header    `json:"Headers,omitempty"`
+	RequestHeaders  http.Header    `json:"RequestHeaders,omitempty"`
 	Body            []byte         `json:"Body,omitempty"`
+	RequestBody     []byte         `json:"RequestBody,omitempty"`
 	StatusCode      int            `json:"StatusCode,omitempty"`
 	ResponseHeaders http.Header    `json:"ResponseHeaders,omitempty"`
 	ResponseBody    []byte         `json:"ResponseBody,omitempty"`
 	Metadata        map[string]any `json:"Metadata,omitempty"`
+}
+
+func (r *RequestInterceptRequest) GetRequestBody() []byte {
+	if len(r.RequestBody) > 0 {
+		return r.RequestBody
+	}
+	return r.Body
+}
+
+func (r *RequestInterceptRequest) GetResponseBody() []byte {
+	if len(r.ResponseBody) > 0 {
+		return r.ResponseBody
+	}
+	return r.Body
+}
+
+func (r *RequestInterceptRequest) GetHeaders() http.Header {
+	if r.RequestHeaders != nil {
+		return r.RequestHeaders
+	}
+	return r.Headers
 }
 
 type RequestInterceptResponse struct {

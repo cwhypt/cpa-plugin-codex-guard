@@ -123,8 +123,9 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	}
 
 	// 2. 若未被拦截，检查测活缓存命中 (probe cache)
-	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.Body) > 0 {
-		hash, eligible, isStream, format := probeEng.ComputeInputHash(req.Body)
+	reqBody := req.GetRequestBody()
+	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
+		hash, eligible, isStream, format := probeEng.ComputeInputHash(reqBody)
 		if eligible && hash != "" {
 			if sample, hit := probeEng.Store().GetRandomSample(hash); hit {
 				probeResp := probeEng.FormatResponse(sample, isStream, format, req.Model)
@@ -163,11 +164,13 @@ func (e *Engine) handleInterceptAfter(request []byte) ([]byte, error) {
 
 	// 2. 观察成功的 200 响应，收集测活样本（仅当输入 <= 20KB 且输出 <= 200 字符）
 	if cfg.IsProbeCacheEnabled() && probeEng != nil {
-		if req.StatusCode >= 200 && req.StatusCode < 300 && len(req.ResponseBody) > 0 {
-			hash, eligible, _, format := probeEng.ComputeInputHash(req.Body)
+		reqBody := req.GetRequestBody()
+		respBody := req.GetResponseBody()
+		if req.StatusCode >= 200 && req.StatusCode < 300 && len(respBody) > 0 && len(reqBody) > 0 {
+			hash, eligible, _, format := probeEng.ComputeInputHash(reqBody)
 			if eligible && hash != "" {
-				if text, ok := probeEng.ExtractOutputText(format, req.ResponseBody); ok {
-					probeEng.Store().AddSample(hash, req.Model, format, text, req.ResponseBody)
+				if text, ok := probeEng.ExtractOutputText(format, respBody); ok {
+					probeEng.Store().AddSample(hash, req.Model, format, text, respBody)
 				}
 			}
 		}
