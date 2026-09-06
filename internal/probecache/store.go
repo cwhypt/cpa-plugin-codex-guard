@@ -82,18 +82,14 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 		}
 	}
 
-	// 检查样本去重（相同文本不再加入）
-	for _, sample := range entry.Samples {
-		if sample.Text == text {
-			return entry.Activated
-		}
+	// 只要未收集满 minSamples，就追加样本（无需输出内容不同）
+	if len(entry.Samples) < s.minSamples {
+		entry.Samples = append(entry.Samples, Sample{
+			Text:        text,
+			RawResponse: json.RawMessage(rawResponse),
+			CreatedAt:   now,
+		})
 	}
-
-	entry.Samples = append(entry.Samples, Sample{
-		Text:        text,
-		RawResponse: json.RawMessage(rawResponse),
-		CreatedAt:   now,
-	})
 
 	if len(entry.Samples) >= s.minSamples {
 		entry.Activated = true
