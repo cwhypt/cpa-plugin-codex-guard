@@ -72,6 +72,15 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 	if inputHash == "" || text == "" || len(rawResponse) == 0 {
 		return false
 	}
+	// RawResponse 落盘时是 json.RawMessage：非法 JSON 会让整个状态文件的
+	// MarshalIndent 失败、静默丢掉全部 entry。非 JSON 载荷在此包一层防御。
+	if !json.Valid(rawResponse) {
+		wrapped, err := json.Marshal(map[string]any{"text": text})
+		if err != nil {
+			return false
+		}
+		rawResponse = wrapped
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

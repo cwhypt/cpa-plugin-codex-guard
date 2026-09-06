@@ -391,6 +391,37 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 	}
 }
 
+// SynthesizeRawResponse 构造一个最小合法的响应 JSON（Sample.RawResponse 为
+// json.RawMessage，非法 JSON 会使整个状态文件序列化失败）。
+func SynthesizeRawResponse(format, model, text string) []byte {
+	now := time.Now().Unix()
+	if format == "responses" {
+		obj := synthesizeResponsesObject(fmt.Sprintf("chatcmpl-cached-%d", time.Now().UnixNano()), model, text, now)
+		b, _ := json.Marshal(obj)
+		return b
+	}
+	obj := map[string]any{
+		"id":      fmt.Sprintf("chatcmpl-cached-%d", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": now,
+		"model":   model,
+		"choices": []any{
+			map[string]any{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": text},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]any{
+			"prompt_tokens":     0,
+			"completion_tokens": len([]rune(text)),
+			"total_tokens":      len([]rune(text)),
+		},
+	}
+	b, _ := json.Marshal(obj)
+	return b
+}
+
 // synthesizeResponsesObject 构造一个最小合法的 OpenAI Responses API response 对象。
 func synthesizeResponsesObject(id, model, text string, nowUnix int64) map[string]any {
 	outputText := map[string]any{
