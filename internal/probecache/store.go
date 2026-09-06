@@ -41,6 +41,14 @@ type Store struct {
 	minSamples int
 	entries    map[string]ProbeEntry
 	isDirty    bool
+	lastErr    error
+}
+
+// LastError returns the most recent persistence error, if any.
+func (s *Store) LastError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastErr
 }
 
 func NewStore(filePath string, ttl time.Duration, minSamples int) *Store {
@@ -97,7 +105,9 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 
 	s.entries[inputHash] = entry
 	s.isDirty = true
-	_ = s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.lastErr = err
+	}
 
 	return entry.Activated
 }
@@ -143,7 +153,9 @@ func (s *Store) GetRandomSample(inputHash string) (*Sample, bool) {
 	entry.HitCount++
 	s.entries[inputHash] = entry
 	s.isDirty = true
-	_ = s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.lastErr = err
+	}
 
 	chosen := entry.Samples[idx]
 	return &chosen, true

@@ -271,6 +271,9 @@ func (e *Engine) handleResponseInterceptAfter(request []byte) ([]byte, error) {
 			if eligible && hash != "" {
 				if textOK {
 					probeEng.Store().AddSample(hash, req.Model, format, text, respBody)
+					if err := probeEng.Store().LastError(); err != nil {
+						e.debugLog("collect", fmt.Sprintf("PERSIST_ERROR reqId=%s store=%s err=%v", req.RequestID, "probe", err))
+					}
 					e.debugLog("collect", fmt.Sprintf("sample hash=%s model=%s textLen=%d reqId=%s", hash, req.Model, len([]rune(text)), req.RequestID))
 				}
 			}
@@ -427,6 +430,9 @@ func (e *Engine) collectStreamSample(reqID string, p *pendingInfo) {
 		return
 	}
 	probeEng.Store().AddSample(p.hash, p.model, p.format, text, []byte(text))
+	if err := probeEng.Store().LastError(); err != nil {
+		e.debugLog("stream-collect", fmt.Sprintf("PERSIST_ERROR reqId=%s store=%s err=%v", reqID, "probe", err))
+	}
 	e.debugLog("stream-collect", fmt.Sprintf("sample hash=%s model=%s textLen=%d reqId=%s", p.hash, p.model, len([]rune(text)), reqID))
 }
 
