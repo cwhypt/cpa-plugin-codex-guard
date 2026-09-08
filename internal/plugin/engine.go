@@ -19,8 +19,34 @@ import (
 // debugLog is temporary diagnostic instrumentation (kept per user request).
 // Relative "data/..." on purpose: resolves against the CPA process working
 // directory, keeping the plugin portable across platforms/installs.
+//
+// Hardening: mutex-serialized, capped at debugLogMaxBytes (over-cap writes
+// are dropped after one notice line), and disabled entirely when
+// debug_log_enabled=false. Rationale: per-request open/append with no bound
+// grows the file without limit (seen 16MB+) and churns fds on every request.
+const debugLogMaxBytes = 50 << 20 // 50MB
+
 func (e *Engine) debugLog(stage, msg string) {
-	f, err := os.OpenFile(filepath.Join("data", "cpa-codex-guard-debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if e.cfg != nil && !e.cfg.IsDebugLogEnabled() {
+		return
+	}
+	e.debugMu.Lock()
+	defer e.debugMu.Unlock()
+	if e.debugCapped {
+		return
+	}
+	path := filepath.Join("data", "cpa-codex-guard-debug.log")
+	if st, err := os.Stat(path); err == nil && st.Size() >= debugLogMaxBytes {
+		e.debugCapped = true
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		f.WriteString(time.Now().Format(time.RFC3339Nano) + " [debug] LOG CAPPED at 50MB, further lines dropped\n")
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
@@ -37,6 +63,9 @@ type Engine struct {
 
 	pendingMu sync.Mutex
 	pending   map[string]*pendingInfo
+
+	debugMu     sync.Mutex
+	debugCapped bool
 }
 
 type pendingInfo struct {
@@ -98,7 +127,28 @@ func (e *Engine) pendingJanitor() {
 	}
 }
 
-func (e *Engine) HandleMethod(method string, request []byte) ([]byte, error) {
+// maxStreamAccumBytes caps per-request SSE text accumulation. Streams larger
+// than this are still proxied normally; only sample collection is skipped.
+const maxStreamAccumBytes = 1 << 20 // 1MB
+
+func (e *Engine) HandleMethod(method string, request []byte) (out []byte, err error) {
+	// The plugin shares the CPA host process: an unrecovered panic here takes
+	// down the whole service. Convert panics to error envelopes instead.
+	// NOTE: recover() only catches Go panics, NOT SIGBUS/SIGSEGV or
+	// concurrent-map fatals. See docs/plugin-crash-hardening-proposals.md.
+	defer func() {
+		if r := recover(); r != nil {
+			e.debugLog("panic", fmt.Sprintf("method=%s recovered=%v", method, r))
+			out, err = json.Marshal(types.Envelope{
+				OK: false,
+				Error: &types.EnvelopeError{
+					Code:       "internal_error",
+					Message:    fmt.Sprintf("plugin panic recovered: %v", r),
+					HTTPStatus: http.StatusInternalServerError,
+				},
+			})
+		}
+	}()
 	switch method {
 	case types.MethodPluginRegister, types.MethodPluginReconfigure:
 		return e.handleRegister(request)
@@ -142,6 +192,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 				{Name: "autofix_responses_lite", Type: "boolean", Description: "Auto-fix missing reasoning.context for Responses-Lite requests"},
 				{Name: "fuzzy_circuit_breaker", Type: "boolean", Description: "Enable session-level fuzzy similarity circuit breaker"},
 				{Name: "probe_cache_enabled", Type: "boolean", Description: "Enable caching and randomized playback for probe traffic"},
+			{Name: "debug_log_enabled", Type: "boolean", Description: "Enable diagnostic debug log (default true, capped at 50MB)"},
 			},
 		},
 		Capabilities: types.Capabilities{
@@ -391,10 +442,17 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 		p, ok := e.pending[req.RequestID]
 		if ok {
 			p.chunkCount += strings.Count(string(req.Body), "data:")
-			p.streamText.Write(req.Body)
-			// Each chunk is a bare SSE frame without a trailing blank line;
-			// append the SSE frame separator so frames never concatenate.
-			p.streamText.WriteString("\n\n")
+			if p.streamText.Len() < maxStreamAccumBytes {
+				room := maxStreamAccumBytes - p.streamText.Len()
+				chunk := req.Body
+				if len(chunk)+2 > room {
+					chunk = chunk[:room-2]
+				}
+				p.streamText.Write(chunk)
+				// Each chunk is a bare SSE frame without a trailing blank line;
+				// append the SSE frame separator so frames never concatenate.
+				p.streamText.WriteString("\n\n")
+			}
 			p.seenAt = time.Now()
 		}
 		e.pendingMu.Unlock()

@@ -34,6 +34,11 @@ type StateData struct {
 	Entries   map[string]ProbeEntry `json:"entries"`
 }
 
+// maxProbeEntries bounds memory and state-file growth: new input hashes are
+// skipped once the pool is full (existing entries keep working). TTL expiry
+// reclaims space over time.
+const maxProbeEntries = 10000
+
 type Store struct {
 	mu         sync.RWMutex
 	filePath   string
@@ -88,6 +93,9 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 	now := time.Now()
 	entry, exists := s.entries[inputHash]
 	if !exists {
+		if len(s.entries) >= maxProbeEntries {
+			return false
+		}
 		entry = ProbeEntry{
 			InputHash: inputHash,
 			Model:     model,

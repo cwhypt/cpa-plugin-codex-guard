@@ -261,3 +261,79 @@ func TestStreamChunkCollectsSampleOnComplete(t *testing.T) {
 		t.Fatalf("pending entry should be evicted after completion")
 	}
 }
+
+func TestDebugLogDisabledWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	f := false
+	cfg.DebugLogEnabled = &f
+	cfg.StateFile = dir + "/guard-state.json"
+	cfg.ProbeStateFile = dir + "/probe-state.json"
+	engine := newEngineWithConfig(cfg)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	engine.debugLog("before", "reqId=x must-not-appear")
+	if _, statErr := os.Stat(dir + "/data/cpa-codex-guard-debug.log"); !os.IsNotExist(statErr) {
+		t.Fatalf("debug log must not be created when disabled")
+	}
+}
+
+func TestDebugLogCappedSkipsWrite(t *testing.T) {
+	engine := newTestEngine(t)
+	engine.debugCapped = true
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	engine.debugLog("before", "reqId=x must-not-appear")
+	if _, statErr := os.Stat(dir + "/data/cpa-codex-guard-debug.log"); !os.IsNotExist(statErr) {
+		t.Fatalf("debug log must not be written once capped")
+	}
+}
+
+func TestStreamChunkTruncatesAccumulation(t *testing.T) {
+	engine := newTestEngine(t)
+	engine.pendingMu.Lock()
+	engine.pending["req-big"] = &pendingInfo{hash: "h", model: "m", format: "openai", isStream: true, seenAt: time.Now()}
+	engine.pendingMu.Unlock()
+
+	big := make([]byte, maxStreamAccumBytes+4096)
+	for i := range big {
+		big[i] = 'a'
+	}
+	raw, err := json.Marshal(types.StreamChunkInterceptRequest{
+		RequestID: "req-big",
+		Model:     "m",
+		Body:      big,
+		ChunkIndex: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.HandleMethod(types.MethodResponseInterceptStreamChunk, raw); err != nil {
+		t.Fatalf("stream chunk failed: %v", err)
+	}
+	engine.pendingMu.Lock()
+	defer engine.pendingMu.Unlock()
+	p, ok := engine.pending["req-big"]
+	if !ok {
+		t.Fatalf("pending entry unexpectedly evicted")
+	}
+	if p.streamText.Len() > maxStreamAccumBytes {
+		t.Fatalf("stream accumulation %d exceeds cap %d", p.streamText.Len(), maxStreamAccumBytes)
+	}
+}

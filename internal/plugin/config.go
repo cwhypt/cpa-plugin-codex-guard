@@ -21,6 +21,9 @@ type Config struct {
 	ProbeMaxInputBytes  int    `json:"probe_max_input_bytes" yaml:"probe_max_input_bytes"`
 	ProbeMaxOutputChars int    `json:"probe_max_output_chars" yaml:"probe_max_output_chars"`
 	ProbeMinSamples     int    `json:"probe_min_samples" yaml:"probe_min_samples"`
+
+	// 诊断日志开关（默认 true）。关闭后 debugLog 直接丢弃，避免磁盘/fd 开销。
+	DebugLogEnabled *bool `json:"debug_log_enabled" yaml:"debug_log_enabled"`
 }
 
 func DefaultConfig() *Config {
@@ -110,6 +113,13 @@ func (c *Config) IsProbeCacheEnabled() bool {
 		return true
 	}
 	return *c.ProbeCacheEnabled
+}
+
+func (c *Config) IsDebugLogEnabled() bool {
+	if c.DebugLogEnabled == nil {
+		return true
+	}
+	return *c.DebugLogEnabled
 }
 
 func (c *Config) GetSimilarityThreshold() float64 {

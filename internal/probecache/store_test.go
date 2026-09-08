@@ -1,6 +1,7 @@
 package probecache
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,5 +59,27 @@ func TestStoreCollectThreeSamplesAndActivate(t *testing.T) {
 	sLoaded, okLoaded := storeLoaded.GetRandomSample(hash1)
 	if !okLoaded || sLoaded == nil {
 		t.Fatalf("expected hash1 to remain active across reload")
+	}
+}
+
+func TestStoreEntryCapSkipsNewHashes(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cpa-probecache-cap-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store := NewStore(filepath.Join(tmpDir, "probe_state.json"), 24*time.Hour, 3)
+	for i := 0; i < maxProbeEntries; i++ {
+		store.entries[fmt.Sprintf("fill-%d", i)] = ProbeEntry{
+			InputHash: "fill",
+			ExpireAt:  time.Now().Add(time.Hour),
+		}
+	}
+	if ok := store.AddSample("brand-new-hash", "m", "chat", "hi", []byte(`{"reply":"x"}`)); ok {
+		t.Fatalf("new hash must be skipped once pool is full")
+	}
+	if _, exists := store.entries["brand-new-hash"]; exists {
+		t.Fatalf("full pool must not store new entry")
 	}
 }
