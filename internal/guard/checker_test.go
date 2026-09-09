@@ -12,7 +12,7 @@ import (
 
 func TestCheckMaxTurns(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
 
 	bodyWithMaxTurns := []byte(`{"model":"gpt-5.6-luna","max_turns":3,"input":[]}`)
 	req := &types.RequestInterceptRequest{
@@ -39,7 +39,7 @@ func TestCheckMaxTurns(t *testing.T) {
 
 func TestCheckInvalidSignature(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
 
 	mockUpstreamErr := []byte(`{"error":{"code":"thinking_signature_invalid","message":"The encrypted content for item rs_08ccb93bdcdfbad6016a9b91fc9f388195b666d5e75bc3d65f could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error"}}`)
 
@@ -87,7 +87,7 @@ func TestCheckInvalidSignature(t *testing.T) {
 
 func TestAutoFixResponsesLiteReasoning(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
 
 	headers := make(http.Header)
 	headers.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
@@ -126,7 +126,7 @@ func TestAutoFixResponsesLiteReasoning(t *testing.T) {
 
 func TestFuzzyCircuitBreakerTripped(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
 
 	// 构造 10 条 input 的初始请求
 	baseBody := `{"client_metadata":{"session_id":"sess-999"},"input":[`
@@ -174,5 +174,36 @@ func TestFuzzyCircuitBreakerTripped(t *testing.T) {
 	}
 	if string(trippedResp.ResponseBody) != string(mockErr) {
 		t.Errorf("expected error body to match upstream, got %s", string(trippedResp.ResponseBody))
+	}
+}
+
+func TestCheckMaxPayloadBytes(t *testing.T) {
+	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
+	checker := NewChecker(store, 100, true, true, true, true, 0.90)
+
+	smallBody := []byte(`{"model":"gpt-5.6-luna","input":[{"role":"user","content":"hi"}]}`)
+	respSmall := checker.CheckRequest(&types.RequestInterceptRequest{Body: smallBody})
+	if respSmall != nil {
+		t.Fatalf("expected small request to pass, got %+v", respSmall)
+	}
+
+	largeBody := make([]byte, 101)
+	for i := range largeBody {
+		largeBody[i] = 'a'
+	}
+	respLarge := checker.CheckRequest(&types.RequestInterceptRequest{Body: largeBody})
+	if respLarge == nil || !respLarge.Terminate {
+		t.Fatalf("expected large request to terminate")
+	}
+	if respLarge.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status %d (502), got %d", http.StatusBadGateway, respLarge.StatusCode)
+	}
+	var errResp map[string]any
+	if err := json.Unmarshal(respLarge.ResponseBody, &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+	errObj := errResp["error"].(map[string]any)
+	if errObj["type"] != "server_overloaded_error" {
+		t.Errorf("expected server_overloaded_error, got %v", errObj["type"])
 	}
 }

@@ -11,7 +11,7 @@ const (
 
 	PluginID   = "cpa-codex-guard"
 	PluginName = "CPA Codex Guard"
-	Version    = "0.3.1"
+	Version    = "0.3.2"
 
 	MethodPluginRegister    = "plugin.register"
 	MethodPluginReconfigure = "plugin.reconfigure"

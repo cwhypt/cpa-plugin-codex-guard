@@ -316,9 +316,9 @@ func TestStreamChunkTruncatesAccumulation(t *testing.T) {
 		big[i] = 'a'
 	}
 	raw, err := json.Marshal(types.StreamChunkInterceptRequest{
-		RequestID: "req-big",
-		Model:     "m",
-		Body:      big,
+		RequestID:  "req-big",
+		Model:      "m",
+		Body:       big,
 		ChunkIndex: 1,
 	})
 	if err != nil {

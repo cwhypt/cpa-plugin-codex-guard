@@ -90,6 +90,7 @@ func newEngineWithConfig(cfg *Config) *Engine {
 	store := state.NewStore(cfg.StateFile, cfg.ParseTTL(), cfg.ParseCircuitTTL())
 	checker := guard.NewChecker(
 		store,
+		cfg.GetMaxPayloadBytes(),
 		cfg.IsBlockMaxTurns(),
 		cfg.IsBlockInvalidSignatures(),
 		cfg.IsAutoFixResponsesLite(),
@@ -184,6 +185,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 			Description:      "Guards against max_turns, invalid signatures, auto-fixes Responses-Lite context, fuzzy circuit breaks, and caches probe traffic",
 			GitHubRepository: "https://github.com/cwhypt/cliproxyapi",
 			ConfigFields: []types.ConfigField{
+				{Name: "max_payload_bytes", Type: "number", Description: "Max allowed request body size in bytes before returning 502 server_is_overloaded (default 15MB)"},
 				{Name: "state_file", Type: "string", Description: "Path to state persistence file"},
 				{Name: "ttl", Type: "string", Description: "TTL for invalid signature cache"},
 				{Name: "circuit_ttl", Type: "string", Description: "TTL for fuzzy circuit breaker (default 3h)"},
@@ -192,7 +194,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 				{Name: "autofix_responses_lite", Type: "boolean", Description: "Auto-fix missing reasoning.context for Responses-Lite requests"},
 				{Name: "fuzzy_circuit_breaker", Type: "boolean", Description: "Enable session-level fuzzy similarity circuit breaker"},
 				{Name: "probe_cache_enabled", Type: "boolean", Description: "Enable caching and randomized playback for probe traffic"},
-			{Name: "debug_log_enabled", Type: "boolean", Description: "Enable diagnostic debug log (default true, capped at 50MB)"},
+				{Name: "debug_log_enabled", Type: "boolean", Description: "Enable diagnostic debug log (default true, capped at 50MB)"},
 			},
 		},
 		Capabilities: types.Capabilities{

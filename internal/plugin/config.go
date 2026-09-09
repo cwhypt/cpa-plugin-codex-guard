@@ -13,6 +13,7 @@ type Config struct {
 	AutoFixResponsesLite   *bool   `json:"autofix_responses_lite" yaml:"autofix_responses_lite"`
 	FuzzyCircuitBreaker    *bool   `json:"fuzzy_circuit_breaker" yaml:"fuzzy_circuit_breaker"`
 	SimilarityThreshold    float64 `json:"fuzzy_similarity_threshold" yaml:"fuzzy_similarity_threshold"`
+	MaxPayloadBytes        int     `json:"max_payload_bytes" yaml:"max_payload_bytes"`
 
 	// 测活流量智能缓存配置
 	ProbeCacheEnabled   *bool  `json:"probe_cache_enabled" yaml:"probe_cache_enabled"`
@@ -37,6 +38,7 @@ func DefaultConfig() *Config {
 		AutoFixResponsesLite:   &t,
 		FuzzyCircuitBreaker:    &t,
 		SimilarityThreshold:    0.90,
+		MaxPayloadBytes:        15 * 1024 * 1024, // 15MB 默认防御超大 payload
 
 		ProbeCacheEnabled:   &t,
 		ProbeCacheTTLStr:    "72h",
@@ -127,4 +129,11 @@ func (c *Config) GetSimilarityThreshold() float64 {
 		return 0.90
 	}
 	return c.SimilarityThreshold
+}
+
+func (c *Config) GetMaxPayloadBytes() int {
+	if c.MaxPayloadBytes <= 0 {
+		return 15 * 1024 * 1024 // 15MB 默认
+	}
+	return c.MaxPayloadBytes
 }

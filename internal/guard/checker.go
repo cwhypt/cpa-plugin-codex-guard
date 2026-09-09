@@ -2,6 +2,7 @@ package guard
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -16,6 +17,7 @@ var (
 
 type Checker struct {
 	store                  *state.Store
+	maxPayloadBytes        int
 	blockMaxTurns          bool
 	blockInvalidSignatures bool
 	autoFixResponsesLite   bool
@@ -23,12 +25,13 @@ type Checker struct {
 	similarityThreshold    float64
 }
 
-func NewChecker(store *state.Store, blockMaxTurns, blockInvalidSignatures, autoFixResponsesLite, fuzzyCircuitBreaker bool, threshold float64) *Checker {
+func NewChecker(store *state.Store, maxPayloadBytes int, blockMaxTurns, blockInvalidSignatures, autoFixResponsesLite, fuzzyCircuitBreaker bool, threshold float64) *Checker {
 	if threshold <= 0 || threshold > 1.0 {
 		threshold = 0.90
 	}
 	return &Checker{
 		store:                  store,
+		maxPayloadBytes:        maxPayloadBytes,
 		blockMaxTurns:          blockMaxTurns,
 		blockInvalidSignatures: blockInvalidSignatures,
 		autoFixResponsesLite:   autoFixResponsesLite,
@@ -46,6 +49,12 @@ func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.Reques
 	if len(body) == 0 {
 		return nil
 	}
+
+	// 0. 超大 Payload 防御：当请求体体积超过阈值时，在反序列化前直接 502 短路
+	if c.maxPayloadBytes > 0 && len(body) > c.maxPayloadBytes {
+		return shortCircuitOverloadedPayload(len(body), c.maxPayloadBytes)
+	}
+
 	headers := req.GetHeaders()
 
 	hasMaxTurnsStr := c.blockMaxTurns && containsSubslice(body, []byte(`"max_turns"`))
@@ -288,6 +297,18 @@ func shortCircuitMaxTurns() *types.RequestInterceptResponse {
 	return &types.RequestInterceptResponse{
 		Terminate:       true,
 		StatusCode:      400,
+		ResponseBody:    respBody,
+		ResponseHeaders: headers,
+	}
+}
+
+func shortCircuitOverloadedPayload(bodyLen, maxBytes int) *types.RequestInterceptResponse {
+	respBody := []byte(fmt.Sprintf(`{"error":{"message":"server_is_overloaded: payload size (%d bytes) exceeds maximum limit (%d bytes)","type":"server_overloaded_error"}}`, bodyLen, maxBytes))
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	return &types.RequestInterceptResponse{
+		Terminate:       true,
+		StatusCode:      http.StatusBadGateway, // 502
 		ResponseBody:    respBody,
 		ResponseHeaders: headers,
 	}
