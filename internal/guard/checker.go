@@ -202,11 +202,15 @@ func invalidToolSchemaIndex(raw json.RawMessage) (int, bool) {
 	if len(raw) == 0 {
 		return 0, false
 	}
-	var tools []map[string]json.RawMessage
+	var tools []json.RawMessage
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return 0, false
 	}
-	for index, tool := range tools {
+	for index, toolRaw := range tools {
+		var tool map[string]json.RawMessage
+		if err := json.Unmarshal(toolRaw, &tool); err != nil {
+			continue
+		}
 		schema, exists := tool["input_schema"]
 		if !exists {
 			continue

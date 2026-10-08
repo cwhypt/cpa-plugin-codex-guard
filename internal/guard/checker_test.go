@@ -3,7 +3,6 @@ package guard
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +25,7 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			name:        "opus 5.5 disabled thinking",
 			body:        `{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"messages":[]}`,
 			wantBlocked: true,
-			wantMessage: `"thinking.type.disabled" is not supported for this model.`,
+			wantMessage: `"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.`,
 			wantRule:    "claude_opus_5_5_disabled",
 		},
 		{
@@ -37,7 +36,7 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			name:        "sonnet 5.5 disabled thinking",
 			body:        `{"model":"claude-sonnet-5-5","thinking":{"type":"disabled"},"messages":[]}`,
 			wantBlocked: true,
-			wantMessage: `send "thinking": {"type": "between_tools"}`,
+			wantMessage: `To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type": "disabled"}. The model does not think before responding. The short updates it writes between tool calls come back as thinking blocks.`,
 			wantRule:    "claude_sonnet_5_5_disabled",
 		},
 		{
@@ -61,6 +60,13 @@ func TestClaudeInvalidRequests(t *testing.T) {
 		{
 			name:        "array tool schema uses actual index",
 			body:        `{"model":"claude-sonnet-5","tools":[{"name":"ok","input_schema":{}},{"name":"clock","input_schema":[]}],"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `tools.1.custom.input_schema: Input does not match the expected shape.`,
+			wantRule:    "claude_invalid_tool_schema",
+		},
+		{
+			name:        "non object tool does not hide later invalid schema",
+			body:        `{"model":"claude-sonnet-5","tools":[42,{"name":"clock","input_schema":null}],"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `tools.1.custom.input_schema: Input does not match the expected shape.`,
 			wantRule:    "claude_invalid_tool_schema",
@@ -113,16 +119,24 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			if resp.RuleID != tt.wantRule {
 				t.Fatalf("expected rule %q, got %q", tt.wantRule, resp.RuleID)
 			}
+			if resp.ResponseHeaders.Get("Content-Type") != "application/json" {
+				t.Fatalf("expected application/json content type, got %q", resp.ResponseHeaders.Get("Content-Type"))
+			}
 			var payload struct {
+				Type  string `json:"type"`
 				Error struct {
+					Type    string `json:"type"`
 					Message string `json:"message"`
 				} `json:"error"`
 			}
 			if err := json.Unmarshal(resp.ResponseBody, &payload); err != nil {
 				t.Fatalf("invalid error response: %v", err)
 			}
-			if !strings.Contains(payload.Error.Message, tt.wantMessage) {
-				t.Fatalf("expected message containing %q, got %q", tt.wantMessage, payload.Error.Message)
+			if payload.Type != "error" || payload.Error.Type != "invalid_request_error" {
+				t.Fatalf("unexpected error envelope: %+v", payload)
+			}
+			if payload.Error.Message != tt.wantMessage {
+				t.Fatalf("expected message %q, got %q", tt.wantMessage, payload.Error.Message)
 			}
 		})
 	}

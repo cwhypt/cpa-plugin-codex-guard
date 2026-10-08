@@ -14,6 +14,7 @@ import (
 	"cpa-codex-guard/internal/probecache"
 	"cpa-codex-guard/internal/state"
 	"cpa-codex-guard/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // debugLog is temporary diagnostic instrumentation (kept per user request).
@@ -152,8 +153,16 @@ func (e *Engine) HandleMethod(method string, request []byte) (out []byte, err er
 		}
 	}()
 	switch method {
-	case types.MethodPluginRegister, types.MethodPluginReconfigure:
+	case types.MethodPluginRegister:
+		if err := e.applyConfig(request); err != nil {
+			return e.configError(err)
+		}
 		return e.handleRegister(request)
+	case types.MethodPluginReconfigure:
+		if err := e.applyConfig(request); err != nil {
+			return e.configError(err)
+		}
+		return e.okEmptyResponse()
 	case types.MethodRequestInterceptBefore:
 		return e.handleInterceptBefore(request)
 	case types.MethodRequestInterceptAfter:
@@ -174,6 +183,55 @@ func (e *Engine) HandleMethod(method string, request []byte) (out []byte, err er
 			},
 		})
 	}
+}
+
+func (e *Engine) applyConfig(request []byte) error {
+	var lifecycle types.LifecycleRequest
+	if len(request) > 0 {
+		if err := json.Unmarshal(request, &lifecycle); err != nil {
+			return fmt.Errorf("decode lifecycle request: %w", err)
+		}
+	}
+	if len(lifecycle.ConfigYAML) == 0 {
+		return nil
+	}
+
+	cfg := DefaultConfig()
+	if err := yaml.Unmarshal(lifecycle.ConfigYAML, cfg); err != nil {
+		return fmt.Errorf("decode plugin config: %w", err)
+	}
+	store := state.NewStore(cfg.StateFile, cfg.ParseTTL(), cfg.ParseCircuitTTL())
+	checker := guard.NewChecker(
+		store,
+		cfg.GetMaxPayloadBytes(),
+		cfg.IsBlockMaxTurns(),
+		cfg.IsBlockInvalidSignatures(),
+		cfg.IsBlockInvalidClaudeRequests(),
+		cfg.IsAutoFixResponsesLite(),
+		cfg.IsFuzzyCircuitBreaker(),
+		cfg.GetSimilarityThreshold(),
+	)
+	probeStore := probecache.NewStore(cfg.ProbeStateFile, cfg.ParseProbeTTL(), cfg.ProbeMinSamples)
+	probeEngine := probecache.NewEngine(probeStore, cfg.ProbeMaxInputBytes, cfg.ProbeMaxOutputChars)
+
+	e.mu.Lock()
+	e.cfg = cfg
+	e.store = store
+	e.checker = checker
+	e.probeEngine = probeEngine
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *Engine) configError(err error) ([]byte, error) {
+	return json.Marshal(types.Envelope{
+		OK: false,
+		Error: &types.EnvelopeError{
+			Code:       "invalid_config",
+			Message:    err.Error(),
+			HTTPStatus: http.StatusBadRequest,
+		},
+	})
 }
 
 func (e *Engine) handleRegister(request []byte) ([]byte, error) {

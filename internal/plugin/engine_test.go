@@ -98,6 +98,46 @@ func TestClaudeInvalidRequestEnvelope(t *testing.T) {
 	}
 }
 
+func TestReconfigureDisablesClaudeInvalidRequestGuard(t *testing.T) {
+	engine := newTestEngine(t)
+	lifecycle, err := json.Marshal(types.LifecycleRequest{
+		ConfigYAML: []byte("block_invalid_claude_requests: false\n"),
+	})
+	if err != nil {
+		t.Fatalf("marshal lifecycle request: %v", err)
+	}
+	if _, err := engine.HandleMethod(types.MethodPluginReconfigure, lifecycle); err != nil {
+		t.Fatalf("reconfigure failed: %v", err)
+	}
+
+	req, err := json.Marshal(types.RequestInterceptRequest{
+		RequestID:    "claude-disabled-1",
+		SourceFormat: "claude",
+		Model:        "claude-opus-5-5",
+		Body:         []byte(`{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	result, err := engine.HandleMethod(types.MethodRequestInterceptBefore, req)
+	if err != nil {
+		t.Fatalf("intercept failed: %v", err)
+	}
+	var env types.Envelope
+	if err := json.Unmarshal(result, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if len(env.Result) != 0 && string(env.Result) != "{}" && string(env.Result) != "null" {
+		var resp types.RequestInterceptResponse
+		if err := json.Unmarshal(env.Result, &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if resp.Terminate {
+			t.Fatalf("expected reconfigured guard to pass request through, got %+v", resp)
+		}
+	}
+}
+
 // request.intercept_after must NOT collect samples: its Body is the rewritten
 // upstream request, not a response, and success is unknown at that point.
 // newTestEngine builds an Engine with isolated state files so tests never
