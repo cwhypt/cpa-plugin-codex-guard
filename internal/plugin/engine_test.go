@@ -40,6 +40,17 @@ func TestEngineRegister(t *testing.T) {
 	}
 }
 
+func TestBlockInvalidClaudeRequestsDefaultsEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.IsBlockInvalidClaudeRequests() {
+		t.Fatal("expected Claude request guard enabled by default")
+	}
+	cfg.BlockInvalidClaudeRequests = nil
+	if !cfg.IsBlockInvalidClaudeRequests() {
+		t.Fatal("expected nil Claude request guard setting to default enabled")
+	}
+}
+
 // request.intercept_after must NOT collect samples: its Body is the rewritten
 // upstream request, not a response, and success is unknown at that point.
 // newTestEngine builds an Engine with isolated state files so tests never

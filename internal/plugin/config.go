@@ -5,15 +5,16 @@ import (
 )
 
 type Config struct {
-	StateFile              string  `json:"state_file" yaml:"state_file"`
-	TTLStr                 string  `json:"ttl" yaml:"ttl"`
-	CircuitTTLStr          string  `json:"circuit_ttl" yaml:"circuit_ttl"`
-	BlockMaxTurns          *bool   `json:"block_max_turns" yaml:"block_max_turns"`
-	BlockInvalidSignatures *bool   `json:"block_invalid_signatures" yaml:"block_invalid_signatures"`
-	AutoFixResponsesLite   *bool   `json:"autofix_responses_lite" yaml:"autofix_responses_lite"`
-	FuzzyCircuitBreaker    *bool   `json:"fuzzy_circuit_breaker" yaml:"fuzzy_circuit_breaker"`
-	SimilarityThreshold    float64 `json:"fuzzy_similarity_threshold" yaml:"fuzzy_similarity_threshold"`
-	MaxPayloadBytes        int     `json:"max_payload_bytes" yaml:"max_payload_bytes"`
+	StateFile                  string  `json:"state_file" yaml:"state_file"`
+	TTLStr                     string  `json:"ttl" yaml:"ttl"`
+	CircuitTTLStr              string  `json:"circuit_ttl" yaml:"circuit_ttl"`
+	BlockMaxTurns              *bool   `json:"block_max_turns" yaml:"block_max_turns"`
+	BlockInvalidSignatures     *bool   `json:"block_invalid_signatures" yaml:"block_invalid_signatures"`
+	BlockInvalidClaudeRequests *bool   `json:"block_invalid_claude_requests" yaml:"block_invalid_claude_requests"`
+	AutoFixResponsesLite       *bool   `json:"autofix_responses_lite" yaml:"autofix_responses_lite"`
+	FuzzyCircuitBreaker        *bool   `json:"fuzzy_circuit_breaker" yaml:"fuzzy_circuit_breaker"`
+	SimilarityThreshold        float64 `json:"fuzzy_similarity_threshold" yaml:"fuzzy_similarity_threshold"`
+	MaxPayloadBytes            int     `json:"max_payload_bytes" yaml:"max_payload_bytes"`
 
 	// 测活流量智能缓存配置
 	ProbeCacheEnabled   *bool  `json:"probe_cache_enabled" yaml:"probe_cache_enabled"`
@@ -30,15 +31,16 @@ type Config struct {
 func DefaultConfig() *Config {
 	t := true
 	return &Config{
-		StateFile:              "data/cpa-codex-guard-state.json",
-		TTLStr:                 "24h",
-		CircuitTTLStr:          "3h",
-		BlockMaxTurns:          &t,
-		BlockInvalidSignatures: &t,
-		AutoFixResponsesLite:   &t,
-		FuzzyCircuitBreaker:    &t,
-		SimilarityThreshold:    0.90,
-		MaxPayloadBytes:        15 * 1024 * 1024, // 15MB 默认防御超大 payload
+		StateFile:                  "data/cpa-codex-guard-state.json",
+		TTLStr:                     "24h",
+		CircuitTTLStr:              "3h",
+		BlockMaxTurns:              &t,
+		BlockInvalidSignatures:     &t,
+		BlockInvalidClaudeRequests: &t,
+		AutoFixResponsesLite:       &t,
+		FuzzyCircuitBreaker:        &t,
+		SimilarityThreshold:        0.90,
+		MaxPayloadBytes:            15 * 1024 * 1024, // 15MB 默认防御超大 payload
 
 		ProbeCacheEnabled:   &t,
 		ProbeCacheTTLStr:    "72h",
@@ -94,6 +96,13 @@ func (c *Config) IsBlockInvalidSignatures() bool {
 		return true
 	}
 	return *c.BlockInvalidSignatures
+}
+
+func (c *Config) IsBlockInvalidClaudeRequests() bool {
+	if c.BlockInvalidClaudeRequests == nil {
+		return true
+	}
+	return *c.BlockInvalidClaudeRequests
 }
 
 func (c *Config) IsAutoFixResponsesLite() bool {
