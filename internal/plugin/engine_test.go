@@ -106,8 +106,28 @@ func TestReconfigureDisablesClaudeInvalidRequestGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal lifecycle request: %v", err)
 	}
-	if _, err := engine.HandleMethod(types.MethodPluginReconfigure, lifecycle); err != nil {
+	registrationResult, err := engine.HandleMethod(types.MethodPluginReconfigure, lifecycle)
+	if err != nil {
 		t.Fatalf("reconfigure failed: %v", err)
+	}
+	var registrationEnvelope types.Envelope
+	if err := json.Unmarshal(registrationResult, &registrationEnvelope); err != nil {
+		t.Fatalf("unmarshal reconfigure envelope: %v", err)
+	}
+	var registration types.Registration
+	if err := json.Unmarshal(registrationEnvelope.Result, &registration); err != nil {
+		t.Fatalf("unmarshal reconfigure registration: %v", err)
+	}
+	if registration.Metadata.Name != types.PluginID || !registration.Capabilities.RequestInterceptor {
+		t.Fatalf("expected valid registration after reconfigure, got %+v", registration)
+	}
+	if engine.cfg.IsBlockMaxTurns() != true ||
+		engine.cfg.IsBlockInvalidSignatures() != true ||
+		engine.cfg.IsAutoFixResponsesLite() != true ||
+		engine.cfg.IsFuzzyCircuitBreaker() != true ||
+		engine.cfg.IsProbeCacheEnabled() != true ||
+		engine.cfg.IsDebugLogEnabled() != true {
+		t.Fatalf("unrelated defaults changed after toggling Claude guard: %+v", engine.cfg)
 	}
 
 	req, err := json.Marshal(types.RequestInterceptRequest{
@@ -136,6 +156,30 @@ func TestReconfigureDisablesClaudeInvalidRequestGuard(t *testing.T) {
 			t.Fatalf("expected reconfigured guard to pass request through, got %+v", resp)
 		}
 	}
+}
+
+func TestReconfigureConcurrentWithDebugLogging(t *testing.T) {
+	engine := newTestEngine(t)
+	lifecycle, err := json.Marshal(types.LifecycleRequest{
+		ConfigYAML: []byte("block_invalid_claude_requests: false\n"),
+	})
+	if err != nil {
+		t.Fatalf("marshal lifecycle request: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			engine.debugLog("test", "concurrent reconfigure")
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		if _, err := engine.HandleMethod(types.MethodPluginReconfigure, lifecycle); err != nil {
+			t.Fatalf("reconfigure failed: %v", err)
+		}
+	}
+	<-done
 }
 
 // request.intercept_after must NOT collect samples: its Body is the rewritten

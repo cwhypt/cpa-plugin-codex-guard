@@ -28,7 +28,10 @@ import (
 const debugLogMaxBytes = 50 << 20 // 50MB
 
 func (e *Engine) debugLog(stage, msg string) {
-	if e.cfg != nil && !e.cfg.IsDebugLogEnabled() {
+	e.mu.RLock()
+	cfg := e.cfg
+	e.mu.RUnlock()
+	if cfg != nil && !cfg.IsDebugLogEnabled() {
 		return
 	}
 	e.debugMu.Lock()
@@ -162,7 +165,7 @@ func (e *Engine) HandleMethod(method string, request []byte) (out []byte, err er
 		if err := e.applyConfig(request); err != nil {
 			return e.configError(err)
 		}
-		return e.okEmptyResponse()
+		return e.handleRegister(request)
 	case types.MethodRequestInterceptBefore:
 		return e.handleInterceptBefore(request)
 	case types.MethodRequestInterceptAfter:

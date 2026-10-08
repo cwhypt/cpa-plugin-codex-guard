@@ -29,26 +29,29 @@ type Config struct {
 }
 
 func DefaultConfig() *Config {
-	t := true
 	return &Config{
 		StateFile:                  "data/cpa-codex-guard-state.json",
 		TTLStr:                     "24h",
 		CircuitTTLStr:              "3h",
-		BlockMaxTurns:              &t,
-		BlockInvalidSignatures:     &t,
-		BlockInvalidClaudeRequests: &t,
-		AutoFixResponsesLite:       &t,
-		FuzzyCircuitBreaker:        &t,
+		BlockMaxTurns:              boolPtr(true),
+		BlockInvalidSignatures:     boolPtr(true),
+		BlockInvalidClaudeRequests: boolPtr(true),
+		AutoFixResponsesLite:       boolPtr(true),
+		FuzzyCircuitBreaker:        boolPtr(true),
 		SimilarityThreshold:        0.90,
 		MaxPayloadBytes:            15 * 1024 * 1024, // 15MB 默认防御超大 payload
 
-		ProbeCacheEnabled:   &t,
+		ProbeCacheEnabled:   boolPtr(true),
 		ProbeCacheTTLStr:    "72h",
 		ProbeStateFile:      "data/cpa-probe-cache-state.json",
 		ProbeMaxInputBytes:  20480, // 20KB
 		ProbeMaxOutputChars: 500,   // 500 字符
 		ProbeMinSamples:     3,     // 至少收集 3 个样本后激活
 	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func (c *Config) ParseTTL() time.Duration {
