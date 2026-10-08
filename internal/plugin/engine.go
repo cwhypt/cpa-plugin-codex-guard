@@ -195,13 +195,11 @@ func (e *Engine) applyConfig(request []byte) error {
 			return fmt.Errorf("decode lifecycle request: %w", err)
 		}
 	}
-	if len(lifecycle.ConfigYAML) == 0 {
-		return nil
-	}
-
 	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(lifecycle.ConfigYAML, cfg); err != nil {
-		return fmt.Errorf("decode plugin config: %w", err)
+	if len(lifecycle.ConfigYAML) > 0 {
+		if err := yaml.Unmarshal(lifecycle.ConfigYAML, cfg); err != nil {
+			return fmt.Errorf("decode plugin config: %w", err)
+		}
 	}
 	store := state.NewStore(cfg.StateFile, cfg.ParseTTL(), cfg.ParseCircuitTTL())
 	checker := guard.NewChecker(

@@ -182,6 +182,33 @@ func TestReconfigureConcurrentWithDebugLogging(t *testing.T) {
 	<-done
 }
 
+func TestEmptyReconfigureRestoresDefaults(t *testing.T) {
+	engine := newTestEngine(t)
+	disabled, err := json.Marshal(types.LifecycleRequest{
+		ConfigYAML: []byte("block_invalid_claude_requests: false\n"),
+	})
+	if err != nil {
+		t.Fatalf("marshal disabled lifecycle: %v", err)
+	}
+	if _, err := engine.HandleMethod(types.MethodPluginReconfigure, disabled); err != nil {
+		t.Fatalf("disable reconfigure failed: %v", err)
+	}
+	if engine.cfg.IsBlockInvalidClaudeRequests() {
+		t.Fatal("expected Claude guard disabled")
+	}
+
+	empty, err := json.Marshal(types.LifecycleRequest{})
+	if err != nil {
+		t.Fatalf("marshal empty lifecycle: %v", err)
+	}
+	if _, err := engine.HandleMethod(types.MethodPluginReconfigure, empty); err != nil {
+		t.Fatalf("empty reconfigure failed: %v", err)
+	}
+	if !engine.cfg.IsBlockInvalidClaudeRequests() {
+		t.Fatal("expected empty reconfigure to restore default-enabled Claude guard")
+	}
+}
+
 // request.intercept_after must NOT collect samples: its Body is the rewritten
 // upstream request, not a response, and success is unknown at that point.
 // newTestEngine builds an Engine with isolated state files so tests never
