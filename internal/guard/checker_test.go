@@ -20,12 +20,14 @@ func TestClaudeInvalidRequests(t *testing.T) {
 		body        string
 		wantBlocked bool
 		wantMessage string
+		wantRule    string
 	}{
 		{
 			name:        "opus 5.5 disabled thinking",
 			body:        `{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `"thinking.type.disabled" is not supported for this model.`,
+			wantRule:    "claude_opus_5_5_disabled",
 		},
 		{
 			name: "opus 5.5 adaptive thinking",
@@ -36,6 +38,7 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			body:        `{"model":"claude-sonnet-5-5","thinking":{"type":"disabled"},"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `send "thinking": {"type": "between_tools"}`,
+			wantRule:    "claude_sonnet_5_5_disabled",
 		},
 		{
 			name: "sonnet 5.5 between tools thinking",
@@ -46,18 +49,21 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			body:        `{"model":"claude-sonnet-5","tools":[{"name":"clock","input_schema":null}],"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `tools.0.custom.input_schema: Input does not match the expected shape.`,
+			wantRule:    "claude_invalid_tool_schema",
 		},
 		{
 			name:        "string tool schema",
 			body:        `{"model":"claude-sonnet-5","tools":[{"name":"clock","input_schema":"bad"}],"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `tools.0.custom.input_schema: Input does not match the expected shape.`,
+			wantRule:    "claude_invalid_tool_schema",
 		},
 		{
 			name:        "array tool schema uses actual index",
 			body:        `{"model":"claude-sonnet-5","tools":[{"name":"ok","input_schema":{}},{"name":"clock","input_schema":[]}],"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `tools.1.custom.input_schema: Input does not match the expected shape.`,
+			wantRule:    "claude_invalid_tool_schema",
 		},
 		{
 			name: "object tool schema",
@@ -76,6 +82,7 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			body:        `{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"tools":[{"name":"clock","input_schema":null}],"messages":[]}`,
 			wantBlocked: true,
 			wantMessage: `tools.0.custom.input_schema: Input does not match the expected shape.`,
+			wantRule:    "claude_invalid_tool_schema",
 		},
 		{
 			name: "wrong model name is outside guard scope",
@@ -102,6 +109,9 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			}
 			if resp == nil || !resp.Terminate || resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("expected terminating 400 response, got %+v", resp)
+			}
+			if resp.RuleID != tt.wantRule {
+				t.Fatalf("expected rule %q, got %q", tt.wantRule, resp.RuleID)
 			}
 			var payload struct {
 				Error struct {

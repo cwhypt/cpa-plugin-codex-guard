@@ -127,6 +127,7 @@ type RequestInterceptResponse struct {
 	Body            []byte      `json:"Body,omitempty"`
 	Headers         http.Header `json:"Headers,omitempty"`
 	ClearHeaders    []string    `json:"ClearHeaders,omitempty"`
+	RuleID          string      `json:"-"`
 }
 
 // RequestCompletion mirrors pluginapi.RequestCompletion (schema v3, no json tags:

@@ -1,7 +1,9 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -38,6 +40,19 @@ func TestEngineRegister(t *testing.T) {
 	if reg.Metadata.Name != types.PluginID {
 		t.Errorf("unexpected name: %s", reg.Metadata.Name)
 	}
+	if reg.Metadata.GitHubRepository != "https://github.com/cwhypt/cpa-plugin-codex-guard" {
+		t.Errorf("unexpected repository: %s", reg.Metadata.GitHubRepository)
+	}
+	foundClaudeGuard := false
+	for _, field := range reg.Metadata.ConfigFields {
+		if field.Name == "block_invalid_claude_requests" {
+			foundClaudeGuard = true
+			break
+		}
+	}
+	if !foundClaudeGuard {
+		t.Fatal("expected block_invalid_claude_requests registration field")
+	}
 }
 
 func TestBlockInvalidClaudeRequestsDefaultsEnabled(t *testing.T) {
@@ -48,6 +63,38 @@ func TestBlockInvalidClaudeRequestsDefaultsEnabled(t *testing.T) {
 	cfg.BlockInvalidClaudeRequests = nil
 	if !cfg.IsBlockInvalidClaudeRequests() {
 		t.Fatal("expected nil Claude request guard setting to default enabled")
+	}
+}
+
+func TestClaudeInvalidRequestEnvelope(t *testing.T) {
+	engine := newTestEngine(t)
+	req, err := json.Marshal(types.RequestInterceptRequest{
+		RequestID:    "claude-invalid-1",
+		SourceFormat: "claude",
+		Model:        "claude-opus-5-5",
+		Body:         []byte(`{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	result, err := engine.HandleMethod(types.MethodRequestInterceptBefore, req)
+	if err != nil {
+		t.Fatalf("intercept failed: %v", err)
+	}
+	var env types.Envelope
+	if err := json.Unmarshal(result, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var resp types.RequestInterceptResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !resp.Terminate || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected terminating 400 response, got %+v", resp)
+	}
+	if !bytes.Contains(resp.ResponseBody, []byte(`thinking.type.disabled`)) {
+		t.Fatalf("unexpected response body: %s", resp.ResponseBody)
 	}
 }
 

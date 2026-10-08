@@ -26,6 +26,12 @@ This plugin provides zero-overhead, multi-layer circuit-breaking and intelligent
    - Subsequent similar requests are immediately short-circuited at the proxy level returning the cached upstream error.
    - Other sessions and clean new windows are completely unaffected!
 
+5. **Exact Claude Request Guards**
+   - Rejects `claude-opus-5-5` requests that send `thinking.type=disabled`; the model requires adaptive thinking plus `output_config.effort`.
+   - Rejects `claude-sonnet-5-5` requests that send `thinking.type=disabled`; the model requires `thinking.type=between_tools` when thinking is turned off.
+   - Rejects Claude tools whose present `input_schema` is `null` or another non-object JSON value.
+   - Returns the observed upstream-compatible HTTP 400 body before any provider call. It does not rewrite requests or handle invalid model names.
+
 ---
 
 ## Directory Structure
@@ -65,7 +71,7 @@ make build
 
 The output dynamic library will be built to:
 ```text
-plugins/linux/arm64/cpa-codex-guard-v0.1.0.so
+plugins/linux/arm64/cpa-codex-guard-v0.3.3.so
 ```
 
 ---
@@ -84,6 +90,7 @@ plugins:
       circuit_ttl: "3h"
       block_max_turns: true
       block_invalid_signatures: true
+      block_invalid_claude_requests: true
       autofix_responses_lite: true
       fuzzy_circuit_breaker: true
       fuzzy_similarity_threshold: 0.90

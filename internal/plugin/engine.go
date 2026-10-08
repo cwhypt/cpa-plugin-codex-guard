@@ -183,8 +183,8 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 			Name:             types.PluginID,
 			Version:          types.Version,
 			Author:           "OpenCode",
-			Description:      "Guards against max_turns, invalid signatures, auto-fixes Responses-Lite context, fuzzy circuit breaks, and caches probe traffic",
-			GitHubRepository: "https://github.com/cwhypt/cliproxyapi",
+			Description:      "Guards invalid Codex and Claude requests, auto-fixes Responses-Lite context, fuzzy circuit breaks, and caches probe traffic",
+			GitHubRepository: "https://github.com/cwhypt/cpa-plugin-codex-guard",
 			ConfigFields: []types.ConfigField{
 				{Name: "max_payload_bytes", Type: "number", Description: "Max allowed request body size in bytes before returning 502 server_is_overloaded (default 15MB)"},
 				{Name: "state_file", Type: "string", Description: "Path to state persistence file"},
@@ -192,6 +192,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 				{Name: "circuit_ttl", Type: "string", Description: "TTL for fuzzy circuit breaker (default 3h)"},
 				{Name: "block_max_turns", Type: "boolean", Description: "Block requests with max_turns parameter"},
 				{Name: "block_invalid_signatures", Type: "boolean", Description: "Block requests with known invalid thinking signatures"},
+				{Name: "block_invalid_claude_requests", Type: "boolean", Description: "Block confirmed invalid Claude thinking and tool-schema request shapes before upstream"},
 				{Name: "autofix_responses_lite", Type: "boolean", Description: "Auto-fix missing reasoning.context for Responses-Lite requests"},
 				{Name: "fuzzy_circuit_breaker", Type: "boolean", Description: "Enable session-level fuzzy similarity circuit breaker"},
 				{Name: "probe_cache_enabled", Type: "boolean", Description: "Enable caching and randomized playback for probe traffic"},
@@ -229,6 +230,9 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 
 	res := checker.CheckRequest(&req)
 	if res != nil {
+		if res.RuleID != "" {
+			e.debugLog("before", fmt.Sprintf("BLOCK rule=%s reqId=%s model=%s", res.RuleID, req.RequestID, req.Model))
+		}
 		resBytes, err := json.Marshal(res)
 		if err != nil {
 			return e.okEmptyResponse()

@@ -172,7 +172,10 @@ func checkInvalidClaudeRequest(root map[string]json.RawMessage) *types.RequestIn
 	}
 
 	if index, invalid := invalidToolSchemaIndex(root["tools"]); invalid {
-		return shortCircuitClaudeInvalidRequest(fmt.Sprintf("tools.%d.custom.input_schema: Input does not match the expected shape.", index))
+		return shortCircuitClaudeInvalidRequest(
+			"claude_invalid_tool_schema",
+			fmt.Sprintf("tools.%d.custom.input_schema: Input does not match the expected shape.", index),
+		)
 	}
 
 	if thinkingType(root["thinking"]) != "disabled" {
@@ -181,9 +184,15 @@ func checkInvalidClaudeRequest(root map[string]json.RawMessage) *types.RequestIn
 
 	switch model {
 	case "claude-opus-5-5":
-		return shortCircuitClaudeInvalidRequest(`"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.`)
+		return shortCircuitClaudeInvalidRequest(
+			"claude_opus_5_5_disabled",
+			`"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.`,
+		)
 	case "claude-sonnet-5-5":
-		return shortCircuitClaudeInvalidRequest(`To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type": "disabled"}. The model does not think before responding. The short updates it writes between tool calls come back as thinking blocks.`)
+		return shortCircuitClaudeInvalidRequest(
+			"claude_sonnet_5_5_disabled",
+			`To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type": "disabled"}. The model does not think before responding. The short updates it writes between tool calls come back as thinking blocks.`,
+		)
 	default:
 		return nil
 	}
@@ -392,7 +401,7 @@ func shortCircuitInvalidSignature(payload []byte) *types.RequestInterceptRespons
 	}
 }
 
-func shortCircuitClaudeInvalidRequest(message string) *types.RequestInterceptResponse {
+func shortCircuitClaudeInvalidRequest(ruleID, message string) *types.RequestInterceptResponse {
 	respBody, _ := json.Marshal(map[string]any{
 		"type": "error",
 		"error": map[string]any{
@@ -407,6 +416,7 @@ func shortCircuitClaudeInvalidRequest(message string) *types.RequestInterceptRes
 		StatusCode:      http.StatusBadRequest,
 		ResponseBody:    respBody,
 		ResponseHeaders: headers,
+		RuleID:          ruleID,
 	}
 }
 
