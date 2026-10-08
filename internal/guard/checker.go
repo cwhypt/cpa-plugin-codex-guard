@@ -16,27 +16,29 @@ var (
 )
 
 type Checker struct {
-	store                  *state.Store
-	maxPayloadBytes        int
-	blockMaxTurns          bool
-	blockInvalidSignatures bool
-	autoFixResponsesLite   bool
-	fuzzyCircuitBreaker    bool
-	similarityThreshold    float64
+	store                      *state.Store
+	maxPayloadBytes            int
+	blockMaxTurns              bool
+	blockInvalidSignatures     bool
+	blockInvalidClaudeRequests bool
+	autoFixResponsesLite       bool
+	fuzzyCircuitBreaker        bool
+	similarityThreshold        float64
 }
 
-func NewChecker(store *state.Store, maxPayloadBytes int, blockMaxTurns, blockInvalidSignatures, autoFixResponsesLite, fuzzyCircuitBreaker bool, threshold float64) *Checker {
+func NewChecker(store *state.Store, maxPayloadBytes int, blockMaxTurns, blockInvalidSignatures, blockInvalidClaudeRequests, autoFixResponsesLite, fuzzyCircuitBreaker bool, threshold float64) *Checker {
 	if threshold <= 0 || threshold > 1.0 {
 		threshold = 0.90
 	}
 	return &Checker{
-		store:                  store,
-		maxPayloadBytes:        maxPayloadBytes,
-		blockMaxTurns:          blockMaxTurns,
-		blockInvalidSignatures: blockInvalidSignatures,
-		autoFixResponsesLite:   autoFixResponsesLite,
-		fuzzyCircuitBreaker:    fuzzyCircuitBreaker,
-		similarityThreshold:    threshold,
+		store:                      store,
+		maxPayloadBytes:            maxPayloadBytes,
+		blockMaxTurns:              blockMaxTurns,
+		blockInvalidSignatures:     blockInvalidSignatures,
+		blockInvalidClaudeRequests: blockInvalidClaudeRequests,
+		autoFixResponsesLite:       autoFixResponsesLite,
+		fuzzyCircuitBreaker:        fuzzyCircuitBreaker,
+		similarityThreshold:        threshold,
 	}
 }
 
@@ -59,10 +61,11 @@ func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.Reques
 
 	hasMaxTurnsStr := c.blockMaxTurns && containsSubslice(body, []byte(`"max_turns"`))
 	hasReasoningStr := c.blockInvalidSignatures && (containsSubslice(body, []byte(`"reasoning"`)) || containsSubslice(body, []byte(`"rs_`)))
+	hasClaudeValidationStr := c.blockInvalidClaudeRequests && (containsSubslice(body, []byte(`"thinking"`)) || containsSubslice(body, []byte(`"tools"`)))
 	isResponsesLite := c.autoFixResponsesLite && isResponsesLiteHeader(headers)
 
 	// 如果没有特殊匹配且未开熔断，快速放行
-	if !hasMaxTurnsStr && !hasReasoningStr && !isResponsesLite && !c.fuzzyCircuitBreaker {
+	if !hasMaxTurnsStr && !hasReasoningStr && !hasClaudeValidationStr && !isResponsesLite && !c.fuzzyCircuitBreaker {
 		return nil
 	}
 
@@ -75,6 +78,12 @@ func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.Reques
 	if c.blockMaxTurns {
 		if _, exists := root["max_turns"]; exists {
 			return shortCircuitMaxTurns()
+		}
+	}
+
+	if c.blockInvalidClaudeRequests {
+		if resp := checkInvalidClaudeRequest(root); resp != nil {
+			return resp
 		}
 	}
 
@@ -154,6 +163,64 @@ func (c *Checker) CheckRequest(req *types.RequestInterceptRequest) *types.Reques
 	}
 
 	return nil
+}
+
+func checkInvalidClaudeRequest(root map[string]json.RawMessage) *types.RequestInterceptResponse {
+	var model string
+	if err := json.Unmarshal(root["model"], &model); err != nil || !strings.HasPrefix(model, "claude-") {
+		return nil
+	}
+
+	if index, invalid := invalidToolSchemaIndex(root["tools"]); invalid {
+		return shortCircuitClaudeInvalidRequest(fmt.Sprintf("tools.%d.custom.input_schema: Input does not match the expected shape.", index))
+	}
+
+	if thinkingType(root["thinking"]) != "disabled" {
+		return nil
+	}
+
+	switch model {
+	case "claude-opus-5-5":
+		return shortCircuitClaudeInvalidRequest(`"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.`)
+	case "claude-sonnet-5-5":
+		return shortCircuitClaudeInvalidRequest(`To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type": "disabled"}. The model does not think before responding. The short updates it writes between tool calls come back as thinking blocks.`)
+	default:
+		return nil
+	}
+}
+
+func invalidToolSchemaIndex(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return 0, false
+	}
+	for index, tool := range tools {
+		schema, exists := tool["input_schema"]
+		if !exists {
+			continue
+		}
+		trimmed := strings.TrimSpace(string(schema))
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func thinkingType(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var thinking struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &thinking); err != nil {
+		return ""
+	}
+	return thinking.Type
 }
 
 // ObserveResponse 在 request.intercept_after / response.intercept_after 钩子中执行
@@ -321,6 +388,24 @@ func shortCircuitInvalidSignature(payload []byte) *types.RequestInterceptRespons
 		Terminate:       true,
 		StatusCode:      400,
 		ResponseBody:    payload,
+		ResponseHeaders: headers,
+	}
+}
+
+func shortCircuitClaudeInvalidRequest(message string) *types.RequestInterceptResponse {
+	respBody, _ := json.Marshal(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    "invalid_request_error",
+			"message": message,
+		},
+	})
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	return &types.RequestInterceptResponse{
+		Terminate:       true,
+		StatusCode:      http.StatusBadRequest,
+		ResponseBody:    respBody,
 		ResponseHeaders: headers,
 	}
 }

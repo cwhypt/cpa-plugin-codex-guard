@@ -3,6 +3,7 @@ package guard
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,9 +11,125 @@ import (
 	"cpa-codex-guard/internal/types"
 )
 
+func TestClaudeInvalidRequests(t *testing.T) {
+	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, true, 0.90)
+
+	tests := []struct {
+		name        string
+		body        string
+		wantBlocked bool
+		wantMessage string
+	}{
+		{
+			name:        "opus 5.5 disabled thinking",
+			body:        `{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `"thinking.type.disabled" is not supported for this model.`,
+		},
+		{
+			name: "opus 5.5 adaptive thinking",
+			body: `{"model":"claude-opus-5-5","thinking":{"type":"adaptive"},"messages":[]}`,
+		},
+		{
+			name:        "sonnet 5.5 disabled thinking",
+			body:        `{"model":"claude-sonnet-5-5","thinking":{"type":"disabled"},"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `send "thinking": {"type": "between_tools"}`,
+		},
+		{
+			name: "sonnet 5.5 between tools thinking",
+			body: `{"model":"claude-sonnet-5-5","thinking":{"type":"between_tools"},"messages":[]}`,
+		},
+		{
+			name:        "null tool schema",
+			body:        `{"model":"claude-sonnet-5","tools":[{"name":"clock","input_schema":null}],"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `tools.0.custom.input_schema: Input does not match the expected shape.`,
+		},
+		{
+			name:        "string tool schema",
+			body:        `{"model":"claude-sonnet-5","tools":[{"name":"clock","input_schema":"bad"}],"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `tools.0.custom.input_schema: Input does not match the expected shape.`,
+		},
+		{
+			name:        "array tool schema uses actual index",
+			body:        `{"model":"claude-sonnet-5","tools":[{"name":"ok","input_schema":{}},{"name":"clock","input_schema":[]}],"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `tools.1.custom.input_schema: Input does not match the expected shape.`,
+		},
+		{
+			name: "object tool schema",
+			body: `{"model":"claude-sonnet-5","tools":[{"name":"clock","input_schema":{"type":"object"}}],"messages":[]}`,
+		},
+		{
+			name: "empty object tool schema",
+			body: `{"model":"claude-sonnet-5","tools":[{"name":"clock","input_schema":{}}],"messages":[]}`,
+		},
+		{
+			name: "missing tool schema",
+			body: `{"model":"claude-sonnet-5","tools":[{"name":"clock"}],"messages":[]}`,
+		},
+		{
+			name:        "tool schema takes precedence over thinking",
+			body:        `{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"tools":[{"name":"clock","input_schema":null}],"messages":[]}`,
+			wantBlocked: true,
+			wantMessage: `tools.0.custom.input_schema: Input does not match the expected shape.`,
+		},
+		{
+			name: "wrong model name is outside guard scope",
+			body: `{"model":"claude-opus-5.5","thinking":{"type":"disabled"},"messages":[]}`,
+		},
+		{
+			name: "other Claude model disabled thinking",
+			body: `{"model":"claude-opus-5","thinking":{"type":"disabled"},"messages":[]}`,
+		},
+		{
+			name: "non Claude model",
+			body: `{"model":"gpt-5.6-luna","thinking":{"type":"disabled"},"tools":[{"name":"clock","input_schema":null}],"messages":[]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := checker.CheckRequest(&types.RequestInterceptRequest{Body: []byte(tt.body)})
+			if !tt.wantBlocked {
+				if resp != nil {
+					t.Fatalf("expected request to pass through, got %+v", resp)
+				}
+				return
+			}
+			if resp == nil || !resp.Terminate || resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected terminating 400 response, got %+v", resp)
+			}
+			var payload struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(resp.ResponseBody, &payload); err != nil {
+				t.Fatalf("invalid error response: %v", err)
+			}
+			if !strings.Contains(payload.Error.Message, tt.wantMessage) {
+				t.Fatalf("expected message containing %q, got %q", tt.wantMessage, payload.Error.Message)
+			}
+		})
+	}
+}
+
+func TestClaudeInvalidRequestsCanBeDisabled(t *testing.T) {
+	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
+	checker := NewChecker(store, 15*1024*1024, true, true, false, true, true, 0.90)
+	body := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"disabled"},"messages":[]}`)
+	if resp := checker.CheckRequest(&types.RequestInterceptRequest{Body: body}); resp != nil {
+		t.Fatalf("expected disabled Claude guard to pass through, got %+v", resp)
+	}
+}
+
 func TestCheckMaxTurns(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, true, 0.90)
 
 	bodyWithMaxTurns := []byte(`{"model":"gpt-5.6-luna","max_turns":3,"input":[]}`)
 	req := &types.RequestInterceptRequest{
@@ -39,7 +156,7 @@ func TestCheckMaxTurns(t *testing.T) {
 
 func TestCheckInvalidSignature(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, true, 0.90)
 
 	mockUpstreamErr := []byte(`{"error":{"code":"thinking_signature_invalid","message":"The encrypted content for item rs_08ccb93bdcdfbad6016a9b91fc9f388195b666d5e75bc3d65f could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error"}}`)
 
@@ -87,7 +204,7 @@ func TestCheckInvalidSignature(t *testing.T) {
 
 func TestAutoFixResponsesLiteReasoning(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, true, 0.90)
 
 	headers := make(http.Header)
 	headers.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
@@ -126,7 +243,7 @@ func TestAutoFixResponsesLiteReasoning(t *testing.T) {
 
 func TestFuzzyCircuitBreakerTripped(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, 15*1024*1024, true, true, true, true, 0.90)
+	checker := NewChecker(store, 15*1024*1024, true, true, true, true, true, 0.90)
 
 	// 构造 10 条 input 的初始请求
 	baseBody := `{"client_metadata":{"session_id":"sess-999"},"input":[`
@@ -179,7 +296,7 @@ func TestFuzzyCircuitBreakerTripped(t *testing.T) {
 
 func TestCheckMaxPayloadBytes(t *testing.T) {
 	store := state.NewStore("", 24*time.Hour, 3*time.Hour)
-	checker := NewChecker(store, 100, true, true, true, true, 0.90)
+	checker := NewChecker(store, 100, true, true, true, true, true, 0.90)
 
 	smallBody := []byte(`{"model":"gpt-5.6-luna","input":[{"role":"user","content":"hi"}]}`)
 	respSmall := checker.CheckRequest(&types.RequestInterceptRequest{Body: smallBody})

@@ -93,6 +93,7 @@ func newEngineWithConfig(cfg *Config) *Engine {
 		cfg.GetMaxPayloadBytes(),
 		cfg.IsBlockMaxTurns(),
 		cfg.IsBlockInvalidSignatures(),
+		cfg.IsBlockInvalidClaudeRequests(),
 		cfg.IsAutoFixResponsesLite(),
 		cfg.IsFuzzyCircuitBreaker(),
 		cfg.GetSimilarityThreshold(),
