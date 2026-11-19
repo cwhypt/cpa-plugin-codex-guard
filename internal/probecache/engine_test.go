@@ -34,6 +34,35 @@ func TestEngineInputHashAndLimits(t *testing.T) {
 	}
 }
 
+func TestResponsesStringInputHash(t *testing.T) {
+	eng := NewEngine(NewStore("", 24*time.Hour, 3), 20480, 200)
+	request := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":"say hi","instructions":"be brief"}`)
+	hash, ok, stream, format := eng.ComputeInputHash(request)
+	if !ok || hash == "" || !stream || format != "responses" {
+		t.Fatalf("string input must be eligible: %q %v %v %q", hash, ok, stream, format)
+	}
+	for _, tc := range []struct {
+		body string
+		same bool
+	}{
+		{`{"instructions":"be brief","input":"say hi","stream":true,"model":"gpt-5.6-sol"}`, true},
+		{`{"model":"gpt-5.6-sol","stream":true,"input":"say hi","instructions":"be verbose"}`, false},
+		{`{"model":"gpt-5.6-sol","stream":true,"input":"say bye","instructions":"be brief"}`, false},
+		{`{"model":"other","stream":true,"input":"say hi","instructions":"be brief"}`, false},
+		{`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"say hi"}]}`, false},
+	} {
+		got, valid, _, _ := eng.ComputeInputHash([]byte(tc.body))
+		if !valid || (got == hash) != tc.same {
+			t.Errorf("body %s: valid=%v same=%v", tc.body, valid, got == hash)
+		}
+	}
+	for _, body := range []string{`{"model":"gpt-5.6-sol","input":""}`, `{"model":"gpt-5.6-sol","input":null}`, `{"model":"gpt-5.6-sol","input":42}`} {
+		if _, ok, _, _ := eng.ComputeInputHash([]byte(body)); ok {
+			t.Errorf("invalid input must bypass cache: %s", body)
+		}
+	}
+}
+
 func TestEngineOutputTextExtractionAndLimits(t *testing.T) {
 	store := NewStore("", 24*time.Hour, 3)
 	eng := NewEngine(store, 20480, 200)

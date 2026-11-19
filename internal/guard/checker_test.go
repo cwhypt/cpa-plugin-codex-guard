@@ -91,6 +91,35 @@ func TestClaudeInvalidRequests(t *testing.T) {
 			wantRule:    "claude_invalid_tool_schema",
 		},
 		{
+			name:        "latest assistant thinking requires signature",
+			body:        `{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan"}]}]}`,
+			wantBlocked: true,
+			wantMessage: `messages.1.content.0: thinking blocks must preserve a non-empty signature and valid content.`,
+			wantRule:    "claude_invalid_thinking_block",
+		},
+		{
+			name:        "latest assistant redacted thinking requires data and signature",
+			body:        `{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"","signature":"sig"}]}]}`,
+			wantBlocked: true,
+			wantMessage: `messages.0.content.0: thinking blocks must preserve a non-empty signature and valid content.`,
+			wantRule:    "claude_invalid_thinking_block",
+		},
+		{
+			name:        "latest assistant rejects non-object content block",
+			body:        `{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[null]}]}`,
+			wantBlocked: true,
+			wantMessage: `messages.0.content.0: thinking blocks must preserve a non-empty signature and valid content.`,
+			wantRule:    "claude_invalid_thinking_block",
+		},
+		{
+			name: "valid latest assistant thinking block",
+			body: `{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"redacted_thinking","data":"encoded","signature":"sig"}]}]}`,
+		},
+		{
+			name: "older malformed assistant thinking is not checked",
+			body: `{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"old"}]},{"role":"user","content":"continue"},{"role":"assistant","content":[{"type":"text","text":"new"}]}]}`,
+		},
+		{
 			name: "wrong model name is outside guard scope",
 			body: `{"model":"claude-opus-5.5","thinking":{"type":"disabled"},"messages":[]}`,
 		},

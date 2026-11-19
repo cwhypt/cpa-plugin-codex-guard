@@ -68,18 +68,25 @@ type Engine struct {
 	pendingMu sync.Mutex
 	pending   map[string]*pendingInfo
 
+	claudeSnapshotMu sync.Mutex
+	claudeSnapshots  map[string]claudeThinkingSnapshot
+
 	debugMu     sync.Mutex
 	debugCapped bool
 }
 
 type pendingInfo struct {
-	hash        string
-	model       string
-	format      string
-	isStream    bool
-	seenAt      time.Time
-	sessionKeys []string
-	inputHashes []string
+	hash          string
+	model         string
+	format        string
+	isStream      bool
+	seenAt        time.Time
+	sessionKeys   []string
+	inputHashes   []string
+	claudeSession string
+	claudeModel   string
+	claudeRawSSE  strings.Builder
+	claudeStream  bool
 	// streamText accumulates SSE delta text while the stream is in flight.
 	streamText strings.Builder
 	// chunkCount tracks how many SSE data frames were seen (diagnostics).
@@ -107,11 +114,12 @@ func newEngineWithConfig(cfg *Config) *Engine {
 	probeEngine := probecache.NewEngine(probeStore, cfg.ProbeMaxInputBytes, cfg.ProbeMaxOutputChars)
 
 	e := &Engine{
-		cfg:         cfg,
-		store:       store,
-		checker:     checker,
-		probeEngine: probeEngine,
-		pending:     make(map[string]*pendingInfo),
+		cfg:             cfg,
+		store:           store,
+		checker:         checker,
+		probeEngine:     probeEngine,
+		pending:         make(map[string]*pendingInfo),
+		claudeSnapshots: make(map[string]claudeThinkingSnapshot),
 	}
 	go e.pendingJanitor()
 	return e
@@ -303,6 +311,28 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	}
 
 	reqBody := req.GetRequestBody()
+	claudeModel, isClaude := claudeRequestModel(reqBody, req.Model)
+	claudeSession := claudeSessionID(req.GetHeaders())
+	if cfg.IsBlockInvalidClaudeRequests() && isClaude {
+		if mismatch := e.checkClaudeSnapshot(claudeSession, claudeModel, reqBody); mismatch != nil {
+			mismatchBytes, err := json.Marshal(mismatch)
+			if err == nil {
+				return json.Marshal(types.Envelope{OK: true, Result: mismatchBytes})
+			}
+		}
+	}
+	if isClaude && claudeStreamRequest(req.GetHeaders(), req.Stream) && req.RequestID != "" && claudeSession != "" {
+		e.pendingMu.Lock()
+		if _, ok := e.pending[req.RequestID]; !ok {
+			e.pending[req.RequestID] = &pendingInfo{
+				seenAt:        time.Now(),
+				claudeSession: claudeSession,
+				claudeModel:   claudeModel,
+				claudeStream:  true,
+			}
+		}
+		e.pendingMu.Unlock()
+	}
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
 		hash, eligible, isStream, format := probeEng.ComputeInputHash(reqBody)
 		e.debugLog("before", fmt.Sprintf("reqId=%s model=%s stream=%v bodyLen=%d eligible=%v hash=%s format=%s", req.RequestID, req.Model, req.Stream, len(reqBody), eligible, hash[:min(len(hash), 12)], format))
@@ -327,17 +357,18 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 				root := map[string]json.RawMessage{}
 				_ = json.Unmarshal(reqBody, &root)
 				e.pendingMu.Lock()
-				if _, ok := e.pending[req.RequestID]; !ok {
-					e.pending[req.RequestID] = &pendingInfo{
-						hash:        hash,
-						model:       req.Model,
-						format:      format,
-						isStream:    isStream,
-						seenAt:      time.Now(),
-						sessionKeys: guard.ExtractSessionKeys(req.GetHeaders(), root),
-						inputHashes: guard.ExtractInputHashes(root),
-					}
+				p, ok := e.pending[req.RequestID]
+				if !ok {
+					p = &pendingInfo{}
+					e.pending[req.RequestID] = p
 				}
+				p.hash = hash
+				p.model = req.Model
+				p.format = format
+				p.isStream = isStream
+				p.seenAt = time.Now()
+				p.sessionKeys = guard.ExtractSessionKeys(req.GetHeaders(), root)
+				p.inputHashes = guard.ExtractInputHashes(root)
 				e.pendingMu.Unlock()
 			}
 		}
@@ -448,6 +479,11 @@ func (e *Engine) handleRequestComplete(request []byte) ([]byte, error) {
 		if p.isStream {
 			e.collectStreamSample(completion.RequestID, p)
 		}
+		if p.claudeStream {
+			if blocks, complete := parseClaudeThinkingSSE([]byte(p.claudeRawSSE.String())); complete {
+				e.saveClaudeSnapshot(p.claudeSession, p.claudeModel, blocks)
+			}
+		}
 	case completion.Outcome == types.OutcomeFailed && completion.StatusCode != 0:
 		checker.RecordOutcome(p.sessionKeys, p.inputHashes, completion.StatusCode, []byte(completion.Error))
 	}
@@ -508,6 +544,14 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 		p, ok := e.pending[req.RequestID]
 		if ok {
 			p.chunkCount += strings.Count(string(req.Body), "data:")
+			if p.claudeStream && p.claudeRawSSE.Len() < claudeSnapshotMaxBytes {
+				room := claudeSnapshotMaxBytes - p.claudeRawSSE.Len()
+				chunk := req.Body
+				if len(chunk) > room {
+					chunk = chunk[:room]
+				}
+				p.claudeRawSSE.Write(chunk)
+			}
 			if p.streamText.Len() < maxStreamAccumBytes {
 				room := maxStreamAccumBytes - p.streamText.Len()
 				chunk := req.Body

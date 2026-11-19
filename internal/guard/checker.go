@@ -178,6 +178,13 @@ func checkInvalidClaudeRequest(root map[string]json.RawMessage) *types.RequestIn
 		)
 	}
 
+	if index, invalid := invalidThinkingBlockIndex(root["messages"]); invalid {
+		return shortCircuitClaudeInvalidRequest(
+			"claude_invalid_thinking_block",
+			fmt.Sprintf("messages.%d.content.%d: thinking blocks must preserve a non-empty signature and valid content.", index[0], index[1]),
+		)
+	}
+
 	if thinkingType(root["thinking"]) != "disabled" {
 		return nil
 	}
@@ -221,6 +228,86 @@ func invalidToolSchemaIndex(raw json.RawMessage) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// invalidThinkingBlockIndex validates only the latest assistant message. Claude
+// requires thinking blocks from the previous response to be replayed with
+// their signature and payload intact. A request-only checker cannot prove that
+// the payload was not edited, but it can reject malformed blocks before they
+// reach the upstream executor.
+func invalidThinkingBlockIndex(raw json.RawMessage) ([2]int, bool) {
+	var messages []json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &messages) != nil {
+		return [2]int{}, false
+	}
+
+	latestAssistant := -1
+	for index, messageRaw := range messages {
+		var message struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(messageRaw, &message) == nil && message.Role == "assistant" {
+			latestAssistant = index
+		}
+	}
+	if latestAssistant < 0 {
+		return [2]int{}, false
+	}
+
+	var message struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(messages[latestAssistant], &message) != nil {
+		return [2]int{}, false
+	}
+	var blocks []json.RawMessage
+	if len(message.Content) == 0 || json.Unmarshal(message.Content, &blocks) != nil {
+		return [2]int{}, false
+	}
+
+	for blockIndex, blockRaw := range blocks {
+		var block map[string]json.RawMessage
+		if json.Unmarshal(blockRaw, &block) != nil || block == nil {
+			return [2]int{latestAssistant, blockIndex}, true
+		}
+		var blockType string
+		if json.Unmarshal(block["type"], &blockType) != nil || blockType == "" {
+			return [2]int{latestAssistant, blockIndex}, true
+		}
+		if blockType != "thinking" && blockType != "redacted_thinking" {
+			continue
+		}
+
+		if !nonEmptyString(block["signature"]) {
+			return [2]int{latestAssistant, blockIndex}, true
+		}
+		if blockType == "thinking" {
+			if !isString(block["thinking"]) {
+				return [2]int{latestAssistant, blockIndex}, true
+			}
+		} else if !nonEmptyString(block["data"]) {
+			return [2]int{latestAssistant, blockIndex}, true
+		}
+	}
+
+	return [2]int{}, false
+}
+
+func isString(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var value string
+	return json.Unmarshal(raw, &value) == nil
+}
+
+func nonEmptyString(raw json.RawMessage) bool {
+	if !isString(raw) {
+		return false
+	}
+	var value string
+	_ = json.Unmarshal(raw, &value)
+	return strings.TrimSpace(value) != ""
 }
 
 func thinkingType(raw json.RawMessage) string {
@@ -422,6 +509,16 @@ func shortCircuitClaudeInvalidRequest(ruleID, message string) *types.RequestInte
 		ResponseHeaders: headers,
 		RuleID:          ruleID,
 	}
+}
+
+// ShortCircuitClaudeThinkingMismatch returns the same public error shape as
+// the Claude upstream validation error, while allowing the request to stop
+// before another upstream attempt.
+func ShortCircuitClaudeThinkingMismatch() *types.RequestInterceptResponse {
+	return shortCircuitClaudeInvalidRequest(
+		"claude_thinking_block_mismatch",
+		"`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. Preserve the original response blocks and signatures.",
+	)
 }
 
 func containsSubslice(haystack, needle []byte) bool {

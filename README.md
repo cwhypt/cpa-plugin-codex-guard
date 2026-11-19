@@ -28,8 +28,10 @@ This plugin provides zero-overhead, multi-layer circuit-breaking and intelligent
 
 5. **Exact Claude Request Guards**
    - Rejects `claude-opus-5-5` requests that send `thinking.type=disabled`; the model requires adaptive thinking plus `output_config.effort`.
-   - Rejects `claude-sonnet-5-5` requests that send `thinking.type=disabled`; the model requires `thinking.type=between_tools` when thinking is turned off.
-   - Rejects Claude tools whose present `input_schema` is `null` or another non-object JSON value.
+    - Rejects `claude-sonnet-5-5` requests that send `thinking.type=disabled`; the model requires `thinking.type=between_tools` when thinking is turned off.
+    - Rejects Claude tools whose present `input_schema` is `null` or another non-object JSON value.
+    - Rejects malformed `thinking` and `redacted_thinking` blocks in the latest assistant message when the required signature or payload is missing.
+    - Captures complete successful Claude streaming thinking blocks in bounded in-memory session state and rejects later sessions that replay a changed block.
    - Returns the observed upstream-compatible HTTP 400 body before any provider call. It does not rewrite requests or handle invalid model names.
 
 ---
@@ -71,7 +73,7 @@ make build
 
 The output dynamic library will be built to:
 ```text
-plugins/linux/arm64/cpa-codex-guard-v0.3.3.so
+plugins/linux/arm64/cpa-codex-guard-v0.3.5.so
 ```
 
 ---

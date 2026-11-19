@@ -1,5 +1,5 @@
 TARGET_DIR = /home/cwhypt/cliproxyapi/plugins/linux/arm64
-PLUGIN_VERSION = 0.3.3
+PLUGIN_VERSION = 0.3.5
 PLUGIN_SO = $(TARGET_DIR)/cpa-codex-guard-v$(PLUGIN_VERSION).so
 GO ?= go
 

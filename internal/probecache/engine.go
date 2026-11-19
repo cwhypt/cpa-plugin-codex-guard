@@ -73,6 +73,17 @@ func (e *Engine) ComputeInputHash(body []byte) (hash string, eligible bool, isSt
 		}
 	} else if inputRaw, ok := root["input"]; ok {
 		format = "responses"
+		var inputText string
+		if err := json.Unmarshal(inputRaw, &inputText); err == nil && inputText != "" {
+			// String-form Responses requests use a separate, full-body key: unlike
+			// the legacy probe fingerprint this includes instructions and options.
+			canonical, err := json.Marshal(root)
+			if err != nil {
+				return "", false, stream, format
+			}
+			sum := sha256.Sum256(append([]byte("responses-string-v1:"), canonical...))
+			return hex.EncodeToString(sum[:]), true, stream, format
+		}
 		var inputs []map[string]any
 		if err := json.Unmarshal(inputRaw, &inputs); err == nil {
 			for _, in := range inputs {
