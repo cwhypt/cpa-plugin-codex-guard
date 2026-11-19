@@ -58,7 +58,7 @@ func (s *Store) LastError() error {
 
 func NewStore(filePath string, ttl time.Duration, minSamples int) *Store {
 	if ttl <= 0 {
-		ttl = 72 * time.Hour
+		ttl = 120 * time.Hour
 	}
 	if minSamples <= 0 {
 		minSamples = 3

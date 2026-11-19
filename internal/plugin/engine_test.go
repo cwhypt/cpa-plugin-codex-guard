@@ -53,6 +53,37 @@ func TestEngineRegister(t *testing.T) {
 	if !foundClaudeGuard {
 		t.Fatal("expected block_invalid_claude_requests registration field")
 	}
+	foundProbeTTL := false
+	for _, field := range reg.Metadata.ConfigFields {
+		if field.Name == "probe_cache_ttl" && field.Type == "string" {
+			foundProbeTTL = true
+		}
+	}
+	if !foundProbeTTL {
+		t.Fatal("expected string probe_cache_ttl registration field")
+	}
+}
+
+func TestProbeCacheTTLConfiguration(t *testing.T) {
+	engine := newTestEngine(t)
+	if got := DefaultConfig().ParseProbeTTL(); got != 120*time.Hour {
+		t.Fatalf("default TTL = %v", got)
+	}
+	for _, value := range []string{"", "5d", "0h"} {
+		if got := (&Config{ProbeCacheTTLStr: value}).ParseProbeTTL(); got != 120*time.Hour {
+			t.Fatalf("fallback TTL for %q = %v", value, got)
+		}
+	}
+	lifecycle, err := json.Marshal(types.LifecycleRequest{ConfigYAML: []byte("probe_cache_ttl: 48h\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.HandleMethod(types.MethodPluginReconfigure, lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.cfg.ParseProbeTTL(); got != 48*time.Hour {
+		t.Fatalf("reconfigured TTL = %v", got)
+	}
 }
 
 func TestBlockInvalidClaudeRequestsDefaultsEnabled(t *testing.T) {

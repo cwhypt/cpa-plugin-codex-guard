@@ -96,7 +96,12 @@ plugins:
       autofix_responses_lite: true
       fuzzy_circuit_breaker: true
       fuzzy_similarity_threshold: 0.90
+      probe_cache_ttl: "120h" # 5 days; Go durations do not support 5d
 ```
+
+`probe_cache_ttl` is editable in the plugin panel. It applies to newly created
+cache entries; existing entries retain their original expiration timestamp.
+An explicit existing `72h` setting must be changed to `120h` for five days.
 
 ---
 

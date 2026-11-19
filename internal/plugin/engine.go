@@ -263,6 +263,7 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 				{Name: "autofix_responses_lite", Type: "boolean", Description: "Auto-fix missing reasoning.context for Responses-Lite requests"},
 				{Name: "fuzzy_circuit_breaker", Type: "boolean", Description: "Enable session-level fuzzy similarity circuit breaker"},
 				{Name: "probe_cache_enabled", Type: "boolean", Description: "Enable caching and randomized playback for probe traffic"},
+				{Name: "probe_cache_ttl", Type: "string", Description: "Probe cache TTL (default 120h / 5 days; use Go duration such as 120h)"},
 				{Name: "debug_log_enabled", Type: "boolean", Description: "Enable diagnostic debug log (default true, capped at 50MB)"},
 			},
 		},
