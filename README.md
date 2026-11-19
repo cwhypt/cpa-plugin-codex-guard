@@ -73,7 +73,7 @@ make build
 
 The output dynamic library will be built to:
 ```text
-plugins/linux/arm64/cpa-codex-guard-v0.3.5.so
+plugins/linux/arm64/cpa-codex-guard-v0.3.6.so
 ```
 
 ---
@@ -102,6 +102,15 @@ plugins:
 `probe_cache_ttl` is editable in the plugin panel. It applies to newly created
 cache entries; existing entries retain their original expiration timestamp.
 An explicit existing `72h` setting must be changed to `120h` for five days.
+
+With `probe_cache_enabled`, the observed `gpt-5.6-sol` Responses health-check
+template for two-digit integer addition/subtraction is solved locally. Only the
+exact known instructions, examples, request fields and `max_output_tokens: 50`
+are accepted; all other requests pass through normally. Local results report
+synthetic usage (372 input, 5 output), based on typical observed probes; these
+numbers do not represent actual upstream token consumption.
+They do not verify provider health. Disable `probe_cache_enabled` to bypass
+this shortcut; it also disables the existing probe cache.
 
 ---
 

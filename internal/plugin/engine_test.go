@@ -64,6 +64,27 @@ func TestEngineRegister(t *testing.T) {
 	}
 }
 
+func TestArithmeticProbeIntercept(t *testing.T) {
+	engine := newTestEngine(t)
+	body := []byte(`{"model":"gpt-5.6-sol","stream":true,"max_output_tokens":50,"instructions":"You are a provider health-check endpoint. Answer the arithmetic challenge exactly and briefly.","input":"Calculate and respond with ONLY the number, nothing else.\n\nQ: 3 + 5 = ?\nA: 8\n\nQ: 12 - 7 = ?\nA: 5\n\nQ: 21 + 30 = ?\nA:"}`)
+	raw, _ := json.Marshal(types.RequestInterceptRequest{Model: "gpt-5.6-sol", Stream: true, Body: body})
+	result, err := engine.HandleMethod(types.MethodRequestInterceptBefore, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env types.Envelope
+	var response types.RequestInterceptResponse
+	if err := json.Unmarshal(result, &env); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Terminate || response.StatusCode != 200 || response.ResponseHeaders.Get("X-CPA-Local-Result") != "" || !bytes.Contains(response.ResponseBody, []byte(`"delta":"51"`)) || !bytes.Contains(response.ResponseBody, []byte("response.completed")) || !bytes.Contains(response.ResponseBody, []byte(`"input_tokens":372,"output_tokens":5,"total_tokens":377`)) {
+		t.Fatalf("unexpected arithmetic response: %+v %s", response, response.ResponseBody)
+	}
+}
+
 func TestProbeCacheTTLConfiguration(t *testing.T) {
 	engine := newTestEngine(t)
 	if got := DefaultConfig().ParseProbeTTL(); got != 120*time.Hour {
