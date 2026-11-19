@@ -56,7 +56,7 @@ func TestResponsesStringInputHash(t *testing.T) {
 			t.Errorf("body %s: valid=%v same=%v", tc.body, valid, got == hash)
 		}
 	}
-	for _, body := range []string{`{"model":"gpt-5.6-sol","input":""}`, `{"model":"gpt-5.6-sol","input":null}`, `{"model":"gpt-5.6-sol","input":42}`} {
+	for _, body := range []string{`{"model":"gpt-5.6-sol","input":""}`, `{"model":"gpt-5.6-sol","input":null}`, `{"model":"gpt-5.6-sol","input":42}`, `{"model":"gpt-5.6-sol","input":[{"role":"user","content":"one"},{"role":"user","content":"two"}]}`, `{"model":"gpt-5.6-sol","input":"say hi","previous_response_id":"resp_1"}`, `{"model":"gpt-5.6-sol","input":"say hi","store":true}`, `{"model":"gpt-5.6-sol","input":"say hi","tools":[{"type":"function"}]}`} {
 		if _, ok, _, _ := eng.ComputeInputHash([]byte(body)); ok {
 			t.Errorf("invalid input must bypass cache: %s", body)
 		}
@@ -150,10 +150,13 @@ func TestHashIgnoresFormatAndStream(t *testing.T) {
 	h3, ok3, _, _ := eng.ComputeInputHash(bodyResponses)
 
 	if !ok1 || !ok2 || !ok3 {
-		t.Fatalf("all three bodies should be eligible")
+		t.Fatalf("all simple text inputs should be eligible")
 	}
-	if h1 != h2 || h1 != h3 {
-		t.Fatalf("hash must match on model+input only: chat=%s stream=%s responses=%s", h1[:12], h2[:12], h3[:12])
+	if h1 != h2 {
+		t.Fatalf("chat hash must match: chat=%s stream=%s", h1[:12], h2[:12])
+	}
+	if h1 == h3 {
+		t.Fatal("Responses array must use a distinct full-body fingerprint")
 	}
 }
 
@@ -195,7 +198,7 @@ func TestFormatResponseResponsesNonStream(t *testing.T) {
 	store := NewStore("", 24*time.Hour, 3)
 	eng := NewEngine(store, 20480, 500)
 
-	sample := &Sample{Text: "pong", RawResponse: []byte(`{"id":"resp_real","usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}`)}
+	sample := &Sample{Text: "pong", RawResponse: []byte(`{"id":"resp_real","object":"response","status":"completed","output":[{"id":"msg_real","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"pong","annotations":[]}]}],"usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}`)}
 	resp := eng.FormatResponse(sample, false, "responses", "gpt-5.6-terra")
 	if resp == nil || !resp.Terminate || resp.StatusCode != 200 {
 		t.Fatalf("expected 200 terminate response")
@@ -223,7 +226,7 @@ func TestFormatResponseResponsesStream(t *testing.T) {
 	store := NewStore("", 24*time.Hour, 3)
 	eng := NewEngine(store, 20480, 500)
 
-	sample := &Sample{Text: "pong", RawResponse: []byte(`{"id":"resp_real","usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}`)}
+	sample := &Sample{Text: "pong", RawResponse: []byte(`{"id":"resp_real","object":"response","status":"completed","output":[{"id":"msg_real","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"pong","annotations":[]}]}],"usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}`)}
 	resp := eng.FormatResponse(sample, true, "responses", "gpt-5.6-terra")
 	if resp == nil || !resp.Terminate {
 		t.Fatalf("expected terminate response")

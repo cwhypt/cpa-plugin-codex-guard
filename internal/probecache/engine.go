@@ -73,6 +73,9 @@ func (e *Engine) ComputeInputHash(body []byte) (hash string, eligible bool, isSt
 		}
 	} else if inputRaw, ok := root["input"]; ok {
 		format = "responses"
+		if !safeResponsesRequest(root) {
+			return "", false, stream, format
+		}
 		var inputText string
 		if err := json.Unmarshal(inputRaw, &inputText); err == nil && inputText != "" {
 			// String-form Responses requests use a separate, full-body key: unlike
@@ -84,14 +87,12 @@ func (e *Engine) ComputeInputHash(body []byte) (hash string, eligible bool, isSt
 			sum := sha256.Sum256(append([]byte("responses-string-v1:"), canonical...))
 			return hex.EncodeToString(sum[:]), true, stream, format
 		}
-		var inputs []map[string]any
-		if err := json.Unmarshal(inputRaw, &inputs); err == nil {
-			for _, in := range inputs {
-				role, _ := in["role"].(string)
-				contentStr := extractContentString(in["content"])
-				normalizedPrompts = append(normalizedPrompts, fmt.Sprintf("%s:%s", role, contentStr))
-			}
+		canonical, err := json.Marshal(root)
+		if err != nil {
+			return "", false, stream, format
 		}
+		sum := sha256.Sum256(append([]byte("responses-array-v2:"), canonical...))
+		return hex.EncodeToString(sum[:]), true, stream, format
 	} else {
 		// 其它非对话协议不进入 probe_cache
 		return "", false, stream, ""
@@ -268,49 +269,7 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 	cacheID := fmt.Sprintf("chatcmpl-cached-%d", time.Now().UnixNano())
 
 	if format == "responses" {
-		resp := synthesizeResponsesObject(cacheID, model, sample.Text, nowUnix)
-		resp["usage"] = usage
-		if !isStream {
-			respHeaders.Set("Content-Type", "application/json")
-			bodyBytes, _ := json.Marshal(resp)
-			return &types.RequestInterceptResponse{
-				Terminate:       true,
-				StatusCode:      200,
-				ResponseBody:    bodyBytes,
-				ResponseHeaders: respHeaders,
-			}
-		}
-
-		// responses 流式：标准 Responses SSE 事件序列
-		respHeaders.Set("Content-Type", "text/event-stream")
-		respHeaders.Set("Cache-Control", "no-cache")
-		respHeaders.Set("Connection", "keep-alive")
-
-		createdResp := synthesizeResponsesObject(cacheID, model, sample.Text, nowUnix)
-		createdResp["status"] = "in_progress"
-		createdResp["output"] = []any{}
-		createdResp["usage"] = nil
-		b1, _ := json.Marshal(map[string]any{"type": "response.created", "response": createdResp})
-
-		b2, _ := json.Marshal(map[string]any{
-			"type":          "response.output_text.delta",
-			"item_id":       "msg_cached_0",
-			"output_index":  0,
-			"content_index": 0,
-			"delta":         sample.Text,
-		})
-
-		completedResp := synthesizeResponsesObject(cacheID, model, sample.Text, nowUnix)
-		completedResp["usage"] = usage
-		b3, _ := json.Marshal(map[string]any{"type": "response.completed", "response": completedResp})
-
-		ssePayload := fmt.Sprintf("event: response.created\ndata: %s\n\nevent: response.output_text.delta\ndata: %s\n\nevent: response.completed\ndata: %s\n\ndata: [DONE]\n\n", string(b1), string(b2), string(b3))
-		return &types.RequestInterceptResponse{
-			Terminate:       true,
-			StatusCode:      200,
-			ResponseBody:    []byte(ssePayload),
-			ResponseHeaders: respHeaders,
-		}
+		return formatResponsesReplay(sample, isStream, model, usage)
 	}
 
 	if !isStream {

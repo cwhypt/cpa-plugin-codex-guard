@@ -73,7 +73,7 @@ make build
 
 The output dynamic library will be built to:
 ```text
-plugins/linux/arm64/cpa-codex-guard-v0.3.7.so
+plugins/linux/arm64/cpa-codex-guard-v0.3.8.so
 ```
 
 ---
@@ -119,6 +119,14 @@ startup or reconfiguration, legacy synthesized samples and samples without
 usable usage are removed from the JSON state; valid samples are preserved and
 entries below the minimum sample count are collected again. No valid usage
 means the request goes upstream rather than fabricating a cached count.
+
+Responses replay is limited to stateless single-text inputs and complete,
+single-message text samples. It creates new response, output and attribution
+IDs consistently and emits the full text event sequence. Stateful requests,
+tools, structured/complex output, or samples with unmappable IDs go upstream.
+Locally generated response IDs are not registered upstream and cannot be used
+as upstream `previous_response_id` values. Existing incompatible samples are
+preserved but excluded from replay and do not count toward activation.
 
 ---
 

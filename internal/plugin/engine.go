@@ -336,12 +336,13 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	}
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
 		if answer, ok := probecache.ArithmeticProbe(reqBody); ok {
-			response := probeEng.FormatResponse(&probecache.Sample{Text: answer, RawResponse: json.RawMessage(`{"usage":{"input_tokens":372,"output_tokens":5,"total_tokens":377}}`)}, req.Stream, "responses", req.Model)
+			raw, _ := json.Marshal(map[string]any{
+				"id": "resp_arithmetic_source", "object": "response", "status": "completed",
+				"usage":  map[string]any{"input_tokens": 372, "output_tokens": 5, "total_tokens": 377},
+				"output": []any{map[string]any{"id": "msg_arithmetic_source", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": answer, "annotations": []any{}}}}},
+			})
+			response := probeEng.FormatResponse(&probecache.Sample{Text: answer, RawResponse: raw}, req.Stream, "responses", req.Model)
 			if response != nil {
-				// Match the typical usage reported by the observed upstream probes.
-				// These are synthetic client-facing counts, not actual upstream usage.
-				body := strings.ReplaceAll(string(response.ResponseBody), "chatcmpl-cached-", "resp_")
-				response.ResponseBody = []byte(body)
 				if encoded, err := json.Marshal(response); err == nil {
 					return json.Marshal(types.Envelope{OK: true, Result: encoded})
 				}

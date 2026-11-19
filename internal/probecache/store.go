@@ -49,6 +49,15 @@ type Store struct {
 	lastErr    error
 }
 
+func replayableSample(sample Sample, format, model string) bool {
+	if format != "responses" {
+		_, ok := realUsage(sample.RawResponse, format)
+		return ok
+	}
+	usage, ok := realUsage(sample.RawResponse, format)
+	return ok && formatResponsesReplay(&sample, false, model, usage) != nil
+}
+
 // LastError returns the most recent persistence error, if any.
 func (s *Store) LastError() error {
 	s.mu.RLock()
@@ -78,6 +87,10 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 		return false
 	}
 	if _, ok := realUsage(rawResponse, format); !ok {
+		return false
+	}
+	newSample := Sample{Text: text, RawResponse: json.RawMessage(rawResponse)}
+	if !replayableSample(newSample, format, model) {
 		return false
 	}
 	// RawResponse 落盘时是 json.RawMessage：非法 JSON 会让整个状态文件的
@@ -110,18 +123,23 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 		}
 	}
 
-	// 只要未收集满 minSamples，就追加样本（无需输出内容不同）
-	if len(entry.Samples) < s.minSamples {
+	// Keep older non-replayable samples intact, but do not count them toward activation.
+	usable := 0
+	for _, sample := range entry.Samples {
+		if replayableSample(sample, format, model) {
+			usable++
+		}
+	}
+	if usable < s.minSamples {
 		entry.Samples = append(entry.Samples, Sample{
 			Text:        text,
 			RawResponse: json.RawMessage(rawResponse),
 			CreatedAt:   now,
 		})
+		usable++
 	}
 
-	if len(entry.Samples) >= s.minSamples {
-		entry.Activated = true
-	}
+	entry.Activated = usable >= s.minSamples
 
 	s.entries[inputHash] = entry
 	s.isDirty = true
@@ -161,8 +179,17 @@ func (s *Store) GetRandomSample(inputHash string) (*Sample, bool) {
 		return nil, false
 	}
 
+	usable := make([]Sample, 0, len(entry.Samples))
+	for _, sample := range entry.Samples {
+		if replayableSample(sample, entry.Format, entry.Model) {
+			usable = append(usable, sample)
+		}
+	}
+	if len(usable) < s.minSamples {
+		return nil, false
+	}
 	// 随机选取一个样本
-	idxBig, err := rand.Int(rand.Reader, big.NewInt(int64(len(entry.Samples))))
+	idxBig, err := rand.Int(rand.Reader, big.NewInt(int64(len(usable))))
 	var idx int
 	if err == nil {
 		idx = int(idxBig.Int64())
@@ -177,7 +204,7 @@ func (s *Store) GetRandomSample(inputHash string) (*Sample, bool) {
 		s.lastErr = err
 	}
 
-	chosen := entry.Samples[idx]
+	chosen := usable[idx]
 	return &chosen, true
 }
 

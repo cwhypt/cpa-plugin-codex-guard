@@ -10,7 +10,7 @@ import (
 )
 
 func TestRealStreamUsageAndLegacyCleanup(t *testing.T) {
-	stream := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_real","usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}}` + "\n\n"
+	stream := "event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"resp_real","object":"response","status":"completed","output":[{"id":"msg_real","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"new","annotations":[]}]}],"usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}}` + "\n\n"
 	real := StreamResponse("responses", stream)
 	if real == nil {
 		t.Fatal("real usage in completed response was not captured")
