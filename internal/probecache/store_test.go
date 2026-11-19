@@ -21,7 +21,7 @@ func TestStoreCollectThreeSamplesAndActivate(t *testing.T) {
 	hash1 := "input_hash_ping"
 
 	// 样本 1
-	act1 := store.AddSample(hash1, "gpt-4o", "chat", "Same Hello", []byte(`{"reply":"1"}`))
+	act1 := store.AddSample(hash1, "gpt-4o", "chat", "Same Hello", []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
 	if act1 {
 		t.Fatalf("should not activate on 1 sample")
 	}
@@ -30,13 +30,13 @@ func TestStoreCollectThreeSamplesAndActivate(t *testing.T) {
 	}
 
 	// 样本 2 (即使文本完全相同也算有效样本)
-	act2 := store.AddSample(hash1, "gpt-4o", "chat", "Same Hello", []byte(`{"reply":"2"}`))
+	act2 := store.AddSample(hash1, "gpt-4o", "chat", "Same Hello", []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
 	if act2 {
 		t.Fatalf("should not activate on 2 samples")
 	}
 
 	// 样本 3 (累积满 3 个样本 -> 正式激活！)
-	act3 := store.AddSample(hash1, "gpt-4o", "chat", "Same Hello", []byte(`{"reply":"3"}`))
+	act3 := store.AddSample(hash1, "gpt-4o", "chat", "Same Hello", []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
 	if !act3 {
 		t.Fatalf("expected store to activate upon reaching 3 samples")
 	}

@@ -73,7 +73,7 @@ make build
 
 The output dynamic library will be built to:
 ```text
-plugins/linux/arm64/cpa-codex-guard-v0.3.6.so
+plugins/linux/arm64/cpa-codex-guard-v0.3.7.so
 ```
 
 ---
@@ -111,6 +111,14 @@ synthetic usage (372 input, 5 output), based on typical observed probes; these
 numbers do not represent actual upstream token consumption.
 They do not verify provider health. Disable `probe_cache_enabled` to bypass
 this shortcut; it also disables the existing probe cache.
+
+Probe cache samples must include real upstream token usage. Stream samples
+capture usage from the completed upstream response; replay reports the selected
+sample's historical usage, not actual consumption on a cache hit. On plugin
+startup or reconfiguration, legacy synthesized samples and samples without
+usable usage are removed from the JSON state; valid samples are preserved and
+entries below the minimum sample count are collected again. No valid usage
+means the request goes upstream rather than fabricating a cached count.
 
 ---
 

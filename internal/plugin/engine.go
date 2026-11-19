@@ -336,12 +336,11 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	}
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
 		if answer, ok := probecache.ArithmeticProbe(reqBody); ok {
-			response := probeEng.FormatResponse(&probecache.Sample{Text: answer}, req.Stream, "responses", req.Model)
+			response := probeEng.FormatResponse(&probecache.Sample{Text: answer, RawResponse: json.RawMessage(`{"usage":{"input_tokens":372,"output_tokens":5,"total_tokens":377}}`)}, req.Stream, "responses", req.Model)
 			if response != nil {
 				// Match the typical usage reported by the observed upstream probes.
 				// These are synthetic client-facing counts, not actual upstream usage.
 				body := strings.ReplaceAll(string(response.ResponseBody), "chatcmpl-cached-", "resp_")
-				body = strings.ReplaceAll(body, fmt.Sprintf(`"input_tokens":0,"output_tokens":%d,"total_tokens":%d`, len(answer), len(answer)), `"input_tokens":372,"output_tokens":5,"total_tokens":377`)
 				response.ResponseBody = []byte(body)
 				if encoded, err := json.Marshal(response); err == nil {
 					return json.Marshal(types.Envelope{OK: true, Result: encoded})
@@ -611,11 +610,12 @@ func (e *Engine) collectStreamSample(reqID string, p *pendingInfo) {
 		e.debugLog("stream-collect", fmt.Sprintf("EMPTY_TEXT reqId=%s raw=%q", reqID, raw))
 		return
 	}
-	// RawResponse 是 json.RawMessage：纯文本会破坏 MarshalIndent，导致整个
-	// 状态文件保存静默失败（v0.3.0 流式样本从未落盘的根因）。合成最小合法
-	// 协议对象（含 text），与回放合成共用同一实现。
-	synthetic := probecache.SynthesizeRawResponse(p.format, p.model, text)
-	probeEng.Store().AddSample(p.hash, p.model, p.format, text, synthetic)
+	response := probecache.StreamResponse(p.format, p.streamText.String())
+	if response == nil {
+		e.debugLog("stream-collect", fmt.Sprintf("NO_REAL_USAGE reqId=%s", reqID))
+		return
+	}
+	probeEng.Store().AddSample(p.hash, p.model, p.format, text, response)
 	if err := probeEng.Store().LastError(); err != nil {
 		e.debugLog("stream-collect", fmt.Sprintf("PERSIST_ERROR reqId=%s store=%s err=%v", reqID, "probe", err))
 	}

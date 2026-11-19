@@ -258,6 +258,10 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 	if sample == nil {
 		return nil
 	}
+	usage, ok := realUsage(sample.RawResponse, format)
+	if !ok {
+		return nil
+	}
 
 	nowUnix := time.Now().Unix()
 	respHeaders := make(http.Header)
@@ -265,6 +269,7 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 
 	if format == "responses" {
 		resp := synthesizeResponsesObject(cacheID, model, sample.Text, nowUnix)
+		resp["usage"] = usage
 		if !isStream {
 			respHeaders.Set("Content-Type", "application/json")
 			bodyBytes, _ := json.Marshal(resp)
@@ -284,6 +289,7 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 		createdResp := synthesizeResponsesObject(cacheID, model, sample.Text, nowUnix)
 		createdResp["status"] = "in_progress"
 		createdResp["output"] = []any{}
+		createdResp["usage"] = nil
 		b1, _ := json.Marshal(map[string]any{"type": "response.created", "response": createdResp})
 
 		b2, _ := json.Marshal(map[string]any{
@@ -295,6 +301,7 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 		})
 
 		completedResp := synthesizeResponsesObject(cacheID, model, sample.Text, nowUnix)
+		completedResp["usage"] = usage
 		b3, _ := json.Marshal(map[string]any{"type": "response.completed", "response": completedResp})
 
 		ssePayload := fmt.Sprintf("event: response.created\ndata: %s\n\nevent: response.output_text.delta\ndata: %s\n\nevent: response.completed\ndata: %s\n\ndata: [DONE]\n\n", string(b1), string(b2), string(b3))
@@ -322,11 +329,7 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 					"finish_reason": "stop",
 				},
 			},
-			"usage": map[string]any{
-				"prompt_tokens":     0,
-				"completion_tokens": len([]rune(sample.Text)),
-				"total_tokens":      len([]rune(sample.Text)),
-			},
+			"usage": usage,
 		}
 		bodyBytes, _ := json.Marshal(body)
 		return &types.RequestInterceptResponse{
@@ -392,7 +395,8 @@ func (e *Engine) FormatResponse(sample *Sample, isStream bool, format, model str
 	}
 	b3, _ := json.Marshal(chunk3)
 
-	ssePayload := fmt.Sprintf("data: %s\n\ndata: %s\n\ndata: %s\n\ndata: [DONE]\n\n", string(b1), string(b2), string(b3))
+	usageChunk, _ := json.Marshal(map[string]any{"id": cacheID, "object": "chat.completion.chunk", "created": nowUnix, "model": model, "choices": []any{}, "usage": usage})
+	ssePayload := fmt.Sprintf("data: %s\n\ndata: %s\n\ndata: %s\n\ndata: %s\n\ndata: [DONE]\n\n", string(b1), string(b2), string(b3), string(usageChunk))
 
 	return &types.RequestInterceptResponse{
 		Terminate:       true,

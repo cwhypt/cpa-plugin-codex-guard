@@ -77,6 +77,9 @@ func (s *Store) AddSample(inputHash, model, format, text string, rawResponse []b
 	if inputHash == "" || text == "" || len(rawResponse) == 0 {
 		return false
 	}
+	if _, ok := realUsage(rawResponse, format); !ok {
+		return false
+	}
 	// RawResponse 落盘时是 json.RawMessage：非法 JSON 会让整个状态文件的
 	// MarshalIndent 失败、静默丢掉全部 entry。非 JSON 载荷在此包一层防御。
 	if !json.Valid(rawResponse) {
@@ -201,7 +204,26 @@ func (s *Store) load() error {
 	now := time.Now()
 	for k, v := range state.Entries {
 		if now.Before(v.ExpireAt) {
+			valid := make([]Sample, 0, len(v.Samples))
+			for _, sample := range v.Samples {
+				if _, ok := realUsage(sample.RawResponse, v.Format); ok {
+					valid = append(valid, sample)
+				} else {
+					s.isDirty = true
+				}
+			}
+			v.Samples = valid
+			v.Activated = len(valid) >= s.minSamples
+			if len(valid) == 0 {
+				continue
+			}
 			s.entries[k] = v
+		}
+	}
+	if s.isDirty {
+		if err := s.saveLocked(); err != nil {
+			s.lastErr = err
+			return err
 		}
 	}
 	return nil

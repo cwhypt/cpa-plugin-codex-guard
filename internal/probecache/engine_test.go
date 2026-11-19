@@ -109,7 +109,8 @@ func TestEngineFormatResponseStreamAndNonStream(t *testing.T) {
 			"id": "chatcmpl-orig",
 			"object": "chat.completion",
 			"model": "gpt-4o",
-			"choices": [{"message": {"role": "assistant", "content": "Hello world"}}]
+			"choices": [{"message": {"role": "assistant", "content": "Hello world"}}],
+			"usage": {"prompt_tokens": 316, "completion_tokens": 5, "total_tokens": 321}
 		}`),
 	}
 
@@ -194,7 +195,7 @@ func TestFormatResponseResponsesNonStream(t *testing.T) {
 	store := NewStore("", 24*time.Hour, 3)
 	eng := NewEngine(store, 20480, 500)
 
-	sample := &Sample{Text: "pong", RawResponse: []byte("pong")}
+	sample := &Sample{Text: "pong", RawResponse: []byte(`{"id":"resp_real","usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}`)}
 	resp := eng.FormatResponse(sample, false, "responses", "gpt-5.6-terra")
 	if resp == nil || !resp.Terminate || resp.StatusCode != 200 {
 		t.Fatalf("expected 200 terminate response")
@@ -213,13 +214,16 @@ func TestFormatResponseResponsesNonStream(t *testing.T) {
 	if !strings.Contains(string(resp.ResponseBody), "pong") {
 		t.Fatalf("body missing sample text")
 	}
+	if !strings.Contains(string(resp.ResponseBody), `"input_tokens":316`) {
+		t.Fatalf("historical usage not replayed: %s", resp.ResponseBody)
+	}
 }
 
 func TestFormatResponseResponsesStream(t *testing.T) {
 	store := NewStore("", 24*time.Hour, 3)
 	eng := NewEngine(store, 20480, 500)
 
-	sample := &Sample{Text: "pong", RawResponse: []byte("pong")}
+	sample := &Sample{Text: "pong", RawResponse: []byte(`{"id":"resp_real","usage":{"input_tokens":316,"output_tokens":5,"total_tokens":321}}`)}
 	resp := eng.FormatResponse(sample, true, "responses", "gpt-5.6-terra")
 	if resp == nil || !resp.Terminate {
 		t.Fatalf("expected terminate response")
@@ -227,6 +231,9 @@ func TestFormatResponseResponsesStream(t *testing.T) {
 	body := string(resp.ResponseBody)
 	if !strings.Contains(body, "response.created") || !strings.Contains(body, "response.output_text.delta") || !strings.Contains(body, "response.completed") || !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("responses SSE missing required events: %s", body)
+	}
+	if !strings.Contains(body, `"input_tokens":316`) {
+		t.Fatalf("historical stream usage not replayed: %s", body)
 	}
 }
 

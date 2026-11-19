@@ -303,7 +303,7 @@ func TestRequestInterceptAfterDoesNotCollectSample(t *testing.T) {
 func TestResponseInterceptAfterCollectsRealSample(t *testing.T) {
 	engine := newTestEngine(t)
 	reqBody := []byte(`{"model":"m-test","messages":[{"role":"user","content":"ping"}]}`)
-	respBody := []byte(`{"choices":[{"message":{"role":"assistant","content":"pong"}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":316,"completion_tokens":5,"total_tokens":321}}`)
 
 	// Seed a pending entry as intercept_before would.
 	hash, eligible, _, _ := engine.probeEngine.ComputeInputHash(reqBody)
@@ -431,6 +431,7 @@ func TestStreamChunkCollectsSampleOnComplete(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"He"}}]}`,
 		`data: {"choices":[{"delta":{"content":"llo"}}]}`,
 		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":316,"completion_tokens":5,"total_tokens":321}}`,
 		`data: [DONE]`,
 	} {
 		raw, errMarshal := json.Marshal(types.StreamChunkInterceptRequest{
@@ -467,6 +468,9 @@ func TestStreamChunkCollectsSampleOnComplete(t *testing.T) {
 	}
 	if samples[0].Text != "Hello" {
 		t.Fatalf("expected stream sample text Hello, got %q", samples[0].Text)
+	}
+	if !bytes.Contains(samples[0].RawResponse, []byte(`"prompt_tokens":316`)) {
+		t.Fatalf("expected real stream usage in stored sample, got %s", samples[0].RawResponse)
 	}
 
 	engine.pendingMu.Lock()
