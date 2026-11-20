@@ -43,12 +43,19 @@ plugins:
           - category: benchmark
             text_all_regex: ['(?i)\bcandy\b', '(?i)\bdistribution\b']
           - category: probe
+            models: [gpt-6.1-sol]
+            user_agent_regex: '^<confirmed-probe-client>/'
+            standalone: true
+            disallow_tools: true
+            max_input_bytes: 2048
             text_all_regex: ['1\s*(?:到|至|[-–])\s*355', '(?:整数|integer)']
 ```
 
-Rules are ordered: the first match wins. All `text_all_regex` patterns must match the latest user text. Optional `models: [model-a, model-b]` and `user_agent_regex` further constrain a rule, but cannot replace a text condition. Unknown categories, invalid regexes, invalid durations and empty/padded auth IDs reject reconfiguration before replacing the active router.
+Rules are ordered: the first match wins. All `text_all_regex` patterns must match the **first effective user text** in the first observed cache-miss request for an unbound/expired session. Optional `models: [model-a, model-b]`, `user_agent_regex` and `caller_scopes: [<opaque CPA caller scope>]` further constrain a rule, but cannot replace a text condition. Unknown categories, invalid regexes, invalid durations and empty/padded auth IDs reject reconfiguration before replacing the active router.
 
-`preferred_auth_ids` is an ordered preference list. `max_priority` is inclusive, so `6` implements priority `< 7` for CPA's integer priorities. Priority-pool ties use ascending auth ID. OAuth, Codex API-key and compatible-provider candidates are all accepted; CPA remains responsible for model support, cooldown, and excluding already-tried accounts.
+Rules targeting a `max_priority` pool must specify `standalone: true`, a positive `max_input_bytes` (whole request size), and either `user_agent_regex` or nonempty `caller_scopes`. Pool categories cannot be the default category. `standalone` permits exactly one user message plus optional system/developer messages, and rejects assistant/tool/unknown conversation items, tools/tool choice, `previous_response_id` and conversation references. `disallow_tools` can also constrain non-pool rules. A UA is a configurable client hint, not proof of caller identity; use `caller_scopes` when the rule must be limited to particular authenticated callers. Tighten text regexes to the entire confirmed template instead of copying the illustrative keyword patterns into production.
+
+`preferred_auth_ids` is an ordered preference list. `max_priority` is inclusive, so `6` implements priority `< 7` for CPA's integer priorities. New pool bindings use CPA-style **smooth weighted round-robin within the highest available priority tier**; lower tiers are used when the higher tier is absent. Weight comes from candidate `Attributes["weight"]`, then metadata if present, defaulting to one; zero/invalid weights are excluded. Equal credits use ascending auth ID for a deterministic tie. Existing session picks do not consume rotation credits again. Rotation credits are persisted atomically with account binding and shared by category/priority across plugin instances; temporary candidate subsets retain absent accounts' credits. This matches priority/weight semantics, but is a separate session-allocation counter, not CPA's per-request accounting counter. OAuth, Codex API-key and compatible-provider candidates are all accepted; CPA remains responsible for model support, cooldown, and excluding already-tried accounts.
 
 ## Scheduler priority and authentication
 
@@ -63,13 +70,13 @@ Changing priority alone does not add Scheduler to an older Guard binary. The exi
 ## Sessions, persistence and failure handling
 
 - Caller scope is supplied by CPA after downstream authentication. Guard never reads a client header to establish caller identity. No caller scope means normal host routing.
-- Explicit session sources include `Session-Id`, `Session_id`, `X-Session-Id`, `X-Session-Affinity`, body `session_id`, `prompt_cache_key`, conversation ID, and host `canonical_session_id`. No identity is inferred from prompt content. With no session, the host execution request ID isolates the request.
+- Host `canonical_session_id` takes precedence. Other explicit sources include `Session-Id`, `Session_id`, `X-Session-Id`, `X-Session-Affinity`, body `session_id`, `prompt_cache_key`, and conversation ID. All sources use CPA-compatible canonical UUID normalization: remove known protocol wrappers, lowercase UUIDs, and deterministically project other IDs to UUIDv8 with the host's domain separator. The same ID in different source fields produces the same binding. The plugin does not infer identity from prompt text. With no session, the host execution request ID isolates the request.
 - Category and selected account are shared across models in the same caller/session. An account that cannot serve a later model causes host fallback; the observed fallback becomes the new session preference. This is soft affinity, not strict account isolation.
-- Classification uses only the latest user text from Responses `input` or Chat Completions `messages`. Tool-only, missing-user, malformed and unsupported multimodal payloads defer to CPA when there is no existing binding.
+- Classification uses the first nonempty effective user text from Responses `input` or Chat Completions `messages`, not the last user turn or any assistant/system/tool content. For newly observed full-history requests, the initial task determines category. For later requests on an active binding, no classification callback runs at all. Tool-only, missing-user, malformed and unsupported multimodal payloads defer to CPA when there is no existing binding.
 - Category is fixed until expiration. Routing requests and account selection refresh the sliding TTL. Cache/local-result hits may refresh an existing explicit session's TTL, but never classify, create a binding, select an account or call upstream. Rule/preference edits apply to new/expired bindings; removing a category makes its bindings defer to CPA.
-- The state file contains opaque SHA-256 caller/session keys, categories, auth IDs and expirations, never prompts or API keys. Use a dedicated file, distinct from Guard/probe state files. Back up the state file with the rest of plugin data if bindings must survive machine replacement.
-- Each transaction takes a stable sibling `.lock` file lock, reloads the current state, removes expired records, writes and syncs a temporary file, then renames it. Linux/macOS use `flock`; Windows uses `LockFileEx`. Old and new plugin instances coordinate through the same file lock. Fallback writes compare the prior account ID so a stale request cannot blindly replace a newer binding.
-- Invalid state is not overwritten. Read/write/lock failures defer to CPA and emit a diagnostic when Guard debug logging is enabled. There is a limit of 10,000 active bindings; new classifications defer when full. The small bounded JSON store serializes disk transactions; a different store is warranted only if measured traffic makes this a bottleneck.
+- The versioned state file contains opaque SHA-256 caller/session keys, categories, auth IDs, expirations and pool credits, never prompts or API keys. Use a dedicated file, distinct from Guard/probe state files. Back up the state file with the rest of plugin data if bindings and rotation must survive machine replacement.
+- Each transaction takes a stable sibling `.lock` file lock, reloads the current state, removes expired records, writes and syncs a temporary file, then renames it. Linux/macOS use `flock`; Windows uses `LockFileEx`. Expiration, new classification and renewal use one timestamp inside the same transaction, preventing expired categories from being recreated from a stale lookup. Compatible plugin instances coordinate through the file lock. Fallback writes compare the prior account ID so a stale request cannot blindly replace a newer binding.
+- Invalid state is not overwritten. Read/write/lock failures defer to CPA and emit a diagnostic when Guard debug logging is enabled. There is a limit of 10,000 active bindings and 1,024 active rotation pools/credits per pool; new allocations defer when full. The small bounded JSON store serializes disk transactions; a different store is warranted only if measured traffic makes this a bottleneck.
 - The internal `X-Cpa-Internal-Session-Route` header is replaced on incoming cache-miss requests. Scheduler requires a matching live host request ID and caller scope. After-selection handling removes the header when present, even when routing is disabled; recording fallback does not depend on the header surviving provider rewrites. It emits no header edits when the marker is absent, avoiding unnecessary host session-metadata reconciliation.
 
 ## Verification
@@ -81,7 +88,15 @@ go test -race ./...
 go vet ./...
 ```
 
-Regression coverage includes configured classification, concurrent first binding, reload persistence, stale fallback protection, sliding expiration, caller isolation, request-only identity, local/cache short-circuit before routing state, unavailable-target deferral, forged markers, disabled caching, invalid reconfiguration and Responses-Lite body repair.
+Regression coverage includes configured classification, first-user extraction, probe context/caller restrictions, concurrent atomic classification, expiry-boundary renewal, canonical-session parity with the host's UUIDv8 golden vector, weighted pool ratios/rotation across instances, zero weights, sticky picks not consuming credits, legacy-state conversion, stream buffer boundaries and routing-only streams, reload persistence, stale fallback protection, sliding expiration, caller isolation, request-only identity, local/cache short-circuit before routing state, unavailable-target deferral, forged markers, disabled caching, invalid reconfiguration and Responses-Lite body repair.
+
+## Transition from the initial routing implementation
+
+This revision fixes all six findings in `session-content-routing-review-2026-11-20.md`.
+
+- A routing pending record does not collect stream bodies unless it also tracks a probe-cache sample. Probe accumulation reserves separator space safely at every buffer length, and releases its mutex with `defer`. Claude snapshot collection remains independent of the probe-cache switch.
+- Legacy bare binding maps are read and converted to the versioned `{version, bindings, pools}` file at the next successful transaction. Old routing builds cannot read the new format and will defer without overwriting it. Do not roll back to an old routing build expecting it to retain affinity.
+- The initial build hashed source-prefixed session identities (`header:...`, `session:...`) instead of canonical IDs. Because those stored keys cannot be reversed, noncanonical legacy keys are retained until TTL expiry but cannot be automatically associated with the new canonical key. A session first seen by this corrected revision may therefore establish a fresh binding once. Subsequent reloads/restarts of corrected versions retain canonical bindings normally. The initial routing implementation has not been deployed by this work.
 
 Host source paths checked for ABI/order compatibility:
 

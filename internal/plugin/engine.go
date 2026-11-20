@@ -589,18 +589,17 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 			e.debugLog("stream-init", fmt.Sprintf("reqId=%s eligible=%v hash=%s format=%s", req.RequestID, eligible, hash[:min(len(hash), 12)], format))
 			if eligible && hash != "" {
 				e.pendingMu.Lock()
-				if _, ok := e.pending[req.RequestID]; !ok {
+				p := e.pending[req.RequestID]
+				if p == nil {
+					p = &pendingInfo{}
+					e.pending[req.RequestID] = p
+				}
+				if p.hash == "" {
 					root := map[string]json.RawMessage{}
 					_ = json.Unmarshal(req.RequestBody, &root)
-					e.pending[req.RequestID] = &pendingInfo{
-						hash:        hash,
-						model:       req.Model,
-						format:      format,
-						isStream:    isStream,
-						seenAt:      time.Now(),
-						sessionKeys: guard.ExtractSessionKeys(req.RequestHeaders, root),
-						inputHashes: guard.ExtractInputHashes(root),
-					}
+					p.hash, p.model, p.format, p.isStream, p.seenAt = hash, req.Model, format, isStream, time.Now()
+					p.sessionKeys = guard.ExtractSessionKeys(req.RequestHeaders, root)
+					p.inputHashes = guard.ExtractInputHashes(root)
 				}
 				e.pendingMu.Unlock()
 			}
@@ -608,40 +607,36 @@ func (e *Engine) handleStreamChunk(request []byte) ([]byte, error) {
 		return e.okStreamResponse(nil, false)
 	}
 
-	// Payload chunk: accumulate SSE delta text into the pending entry.
-	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(req.Body) > 0 {
-		e.pendingMu.Lock()
-		p, ok := e.pending[req.RequestID]
-		if ok {
-			p.chunkCount += strings.Count(string(req.Body), "data:")
-			if p.claudeStream && p.claudeRawSSE.Len() < claudeSnapshotMaxBytes {
-				room := claudeSnapshotMaxBytes - p.claudeRawSSE.Len()
-				chunk := req.Body
-				if len(chunk) > room {
-					chunk = chunk[:room]
-				}
-				p.claudeRawSSE.Write(chunk)
-			}
-			if p.streamText.Len() < maxStreamAccumBytes {
-				room := maxStreamAccumBytes - p.streamText.Len()
-				chunk := req.Body
-				if len(chunk)+2 > room {
-					chunk = chunk[:room-2]
-				}
-				p.streamText.Write(chunk)
-				// Each chunk is a bare SSE frame without a trailing blank line;
-				// append the SSE frame separator so frames never concatenate.
-				p.streamText.WriteString("\n\n")
-			}
-			p.seenAt = time.Now()
-		}
-		e.pendingMu.Unlock()
-		if !ok {
+	if len(req.Body) > 0 {
+		if !e.accumulateStreamChunk(&req, cfg.IsProbeCacheEnabled() && probeEng != nil) {
 			e.debugLog("stream-chunk", fmt.Sprintf("reqId=%s NO PENDING ENTRY bodyLen=%d", req.RequestID, len(req.Body)))
 		}
 	}
 
 	return e.okStreamResponse(nil, false)
+}
+
+func (e *Engine) accumulateStreamChunk(req *types.StreamChunkInterceptRequest, collectProbe bool) bool {
+	e.pendingMu.Lock()
+	defer e.pendingMu.Unlock()
+	p := e.pending[req.RequestID]
+	if p == nil {
+		return false
+	}
+	if p.claudeStream && p.claudeRawSSE.Len() < claudeSnapshotMaxBytes {
+		room := claudeSnapshotMaxBytes - p.claudeRawSSE.Len()
+		p.claudeRawSSE.Write(req.Body[:min(len(req.Body), room)])
+	}
+	// Routing-only records must never collect response content as probe samples.
+	if collectProbe && p.isStream && p.hash != "" {
+		p.chunkCount += strings.Count(string(req.Body), "data:")
+		if room := maxStreamAccumBytes - p.streamText.Len(); room >= 2 {
+			p.streamText.Write(req.Body[:min(len(req.Body), room-2)])
+			p.streamText.WriteString("\n\n")
+		}
+	}
+	p.seenAt = time.Now()
+	return true
 }
 
 // collectStreamSample finalizes a streaming sample when the request completes

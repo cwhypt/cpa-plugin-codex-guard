@@ -3,6 +3,7 @@ package plugin
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,22 +78,14 @@ func (e *Engine) prepareSessionRoute(req *types.RequestInterceptRequest, body []
 	if err != nil {
 		return nil, clear
 	}
-	binding, exists, err := router.store.LookupKey(key)
-	if err != nil {
-		e.debugLog("session-route", "state lookup failed; using host scheduler")
-		return nil, clear
-	}
-	category := binding.Category
-	if !exists {
-		var ok bool
-		category, ok = router.config.Classify(req.Model, req.GetHeaders().Get("User-Agent"), body)
-		if !ok {
-			return nil, clear
-		}
-	}
-	binding, err = router.store.ClassifyOnce(caller, session, category)
+	binding, resolved, err := router.store.Resolve(caller, session, func() (string, bool) {
+		return router.config.ClassifyForCaller(req.Model, req.GetHeaders().Get("User-Agent"), caller, body)
+	})
 	if err != nil {
 		e.debugLog("session-route", "state write failed; using host scheduler")
+		return nil, clear
+	}
+	if !resolved {
 		return nil, clear
 	}
 	e.pendingMu.Lock()
@@ -144,7 +137,8 @@ func (e *Engine) handleSessionRoutePick(raw []byte) ([]byte, error) {
 		if candidate.Status == "disabled" {
 			continue
 		}
-		candidates = append(candidates, sessionroute.Candidate{ID: candidate.ID, Priority: candidate.Priority})
+		weight := schedulerWeight(candidate)
+		candidates = append(candidates, sessionroute.Candidate{ID: candidate.ID, Priority: candidate.Priority, Weight: &weight})
 	}
 	id, handled, err := router.store.PickKey(key, router.config.Categories, candidates)
 	if err != nil {
@@ -159,6 +153,32 @@ func (e *Engine) handleSessionRoutePick(raw []byte) ([]byte, error) {
 		e.pendingMu.Unlock()
 	}
 	return e.schedulerResult(id, handled)
+}
+
+func schedulerWeight(candidate types.SchedulerCandidate) int64 {
+	raw := strings.TrimSpace(candidate.Attributes["weight"])
+	if raw == "" {
+		if value, exists := candidate.Metadata["weight"]; exists {
+			switch value := value.(type) {
+			case string:
+				raw = strings.TrimSpace(value)
+			case float64:
+				raw = strconv.FormatFloat(value, 'f', -1, 64)
+			default:
+				return 0
+			}
+		} else {
+			return 1
+		}
+	}
+	if raw == "" {
+		return 1
+	}
+	weight, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || weight < 0 || weight > 1000000 {
+		return 0
+	}
+	return weight
 }
 
 func (e *Engine) schedulerResult(id string, handled bool) ([]byte, error) {

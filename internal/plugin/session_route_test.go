@@ -37,6 +37,9 @@ session_routing:
     - category: probe
       models: [gpt-6.1-sol]
       user_agent_regex: '^Codex Desktop/'
+      standalone: true
+      max_input_bytes: 2048
+      disallow_tools: true
       text_all_regex: ['1 到 355', '整数']
 `, state+".guard", state+".probe", state)
 	raw, _ := json.Marshal(types.LifecycleRequest{ConfigYAML: []byte(config)})
@@ -73,13 +76,11 @@ func routePick(t *testing.T, e *Engine, marker string, metadata map[string]any, 
 	req.Options.Headers = http.Header{internalRouteHeader: []string{marker}}
 	req.Options.Metadata = metadata
 	for _, candidate := range candidates {
-		req.Candidates = append(req.Candidates, struct {
-			ID         string            `json:"ID"`
-			Provider   string            `json:"Provider"`
-			Priority   int               `json:"Priority"`
-			Status     string            `json:"Status"`
-			Attributes map[string]string `json:"Attributes"`
-		}{candidate.ID, "codex", candidate.Priority, "active", nil})
+		attrs := map[string]string{}
+		if candidate.Weight != nil {
+			attrs["weight"] = fmt.Sprint(*candidate.Weight)
+		}
+		req.Candidates = append(req.Candidates, types.SchedulerCandidate{ID: candidate.ID, Provider: "codex", Priority: candidate.Priority, Status: "active", Attributes: attrs})
 	}
 	raw, _ := json.Marshal(req)
 	data, err := e.HandleMethod("scheduler.pick", raw)
@@ -173,7 +174,8 @@ func TestSessionRoutingCachePrecedesClassification(t *testing.T) {
 	// An existing session stays alive without choosing an account on a hit.
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	e.sessionRouter.store.Now = func() time.Time { return now }
-	if _, err := e.sessionRouter.store.ClassifyOnce("caller-a", "header:session", "benchmark"); err != nil {
+	sessionID := sessionroute.SessionID(http.Header{"X-Session-Id": {"session"}}, []byte(`{}`), nil)
+	if _, err := e.sessionRouter.store.ClassifyOnce("caller-a", sessionID, "benchmark"); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(50 * time.Minute)
@@ -182,7 +184,7 @@ func TestSessionRoutingCachePrecedesClassification(t *testing.T) {
 		t.Fatal("existing cached session entered routing")
 	}
 	now = now.Add(20 * time.Minute)
-	key, _ := sessionroute.Key("caller-a", "header:session")
+	key, _ := sessionroute.Key("caller-a", sessionID)
 	binding, exists, err := e.sessionRouter.store.LookupKey(key)
 	if err != nil || !exists || binding.Category != "benchmark" || binding.AuthID != "" {
 		t.Fatalf("cache hit must refresh only existing TTL: %+v %v %v", binding, exists, err)

@@ -6,7 +6,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestConfiguredClassificationUsesLatestUserText(t *testing.T) {
+func TestConfiguredClassificationUsesFirstUserText(t *testing.T) {
 	const config = `
 enabled: true
 default_category: general
@@ -24,6 +24,8 @@ rules:
   - category: probe
     models: [gpt-6.1-sol]
     user_agent_regex: '^Codex Desktop/'
+    standalone: true
+    max_input_bytes: 2048
     text_all_regex: ['1 到 355', '整数']
 `
 	var cfg Config
@@ -37,7 +39,7 @@ rules:
 		{"gpt-6-astra", "client", `{"input":"Generate a valid SVG"}`, "benchmark"},
 		{"gpt-6.1-sol", "Codex Desktop/1", `{"input":[{"role":"user","content":[{"type":"input_text","text":"选择 1 到 355 的整数"}]}]}`, "probe"},
 		{"gpt-6.1-sol", "client", `{"input":[{"role":"user","content":"选择 1 到 355 的整数"}]}`, "general"},
-		{"gpt-6-astra", "client", `{"input":[{"role":"user","content":"Generate a valid SVG"},{"role":"assistant","content":"old"},{"role":"user","content":"ordinary question"}]}`, "general"},
+		{"gpt-6-astra", "client", `{"input":[{"role":"user","content":"Generate a valid SVG"},{"role":"assistant","content":"old"},{"role":"user","content":"ordinary question"}]}`, "benchmark"},
 		{"gpt-6-astra", "client", `{"messages":[{"role":"tool","content":"Generate a valid SVG"},{"role":"user","content":"ordinary question"}]}`, "general"},
 	} {
 		got, ok := cfg.Classify(tc.model, tc.ua, []byte(tc.body))

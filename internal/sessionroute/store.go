@@ -9,11 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const maxBindings = 10000
+const maxPoolEntries = 1024
+const maxWeight = 1000000 // CPA's credential weight limit.
 
 type Binding struct {
 	Category  string    `json:"category"`
@@ -24,9 +27,26 @@ type Binding struct {
 type Candidate struct {
 	ID       string
 	Priority int
+	Weight   *int64 // nil means CPA's default weight of one; zero disables selection.
 }
 
-// Store shares state across plugin versions and processes using an advisory lock.
+type poolCredit struct {
+	Weight  int64 `json:"weight"`
+	Current int64 `json:"current"`
+}
+
+type poolState struct {
+	Credits   map[string]poolCredit `json:"credits"`
+	ExpiresAt time.Time             `json:"expires_at"`
+}
+
+type routingState struct {
+	Version  int                  `json:"version"`
+	Bindings map[string]Binding   `json:"bindings"`
+	Pools    map[string]poolState `json:"pools"`
+}
+
+// Store shares bindings and rotation credits across plugin instances/processes.
 type Store struct {
 	Path string
 	TTL  time.Duration
@@ -42,7 +62,6 @@ func bindingKey(caller, session string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// Key returns an opaque binding key without exposing the caller or session ID.
 func Key(caller, session string) (string, error) { return bindingKey(caller, session) }
 
 func validKey(key string) bool {
@@ -57,7 +76,41 @@ func (s *Store) now() time.Time {
 	return time.Now()
 }
 
-func (s *Store) update(fn func(map[string]Binding) error) error {
+func decodeRoutingState(data []byte) (routingState, error) {
+	state := routingState{Version: 1, Bindings: make(map[string]Binding), Pools: make(map[string]poolState)}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil || root == nil {
+		return state, errors.New("invalid routing state; refusing to overwrite")
+	}
+	if _, versioned := root["version"]; versioned {
+		if json.Unmarshal(data, &state) != nil || state.Version != 1 || state.Bindings == nil {
+			return state, errors.New("invalid routing state version; refusing to overwrite")
+		}
+	} else if json.Unmarshal(data, &state.Bindings) != nil {
+		return state, errors.New("invalid legacy routing state; refusing to overwrite")
+	}
+	for key, binding := range state.Bindings {
+		if !validKey(key) || binding.Category == "" || binding.ExpiresAt.IsZero() {
+			return state, errors.New("invalid routing binding; refusing to overwrite")
+		}
+	}
+	if state.Pools == nil {
+		state.Pools = make(map[string]poolState)
+	}
+	for key, pool := range state.Pools {
+		if !validKey(key) || pool.ExpiresAt.IsZero() || len(pool.Credits) > maxPoolEntries {
+			return state, errors.New("invalid routing pool; refusing to overwrite")
+		}
+		for id, credit := range pool.Credits {
+			if id == "" || credit.Weight <= 0 || credit.Weight > maxWeight || credit.Current < -(1<<60) || credit.Current > 1<<60 {
+				return state, errors.New("invalid routing credit; refusing to overwrite")
+			}
+		}
+	}
+	return state, nil
+}
+
+func (s *Store) update(fn func(*routingState, time.Time) error) error {
 	if s.Path == "" || s.TTL <= 0 {
 		return errors.New("state file and positive TTL are required")
 	}
@@ -75,30 +128,33 @@ func (s *Store) update(fn func(map[string]Binding) error) error {
 		return err
 	}
 	defer unlock()
-	bindings := make(map[string]Binding)
+	state := routingState{Version: 1, Bindings: make(map[string]Binding), Pools: make(map[string]poolState)}
 	data, err := os.ReadFile(s.Path)
 	if err == nil {
-		if err := json.Unmarshal(data, &bindings); err != nil || bindings == nil {
-			return errors.New("invalid routing state; refusing to overwrite")
-		}
-		for key, binding := range bindings {
-			if !validKey(key) || binding.Category == "" || binding.ExpiresAt.IsZero() {
-				return errors.New("invalid routing binding; refusing to overwrite")
-			}
+		state, err = decodeRoutingState(data)
+		if err != nil {
+			return err
 		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	// Expiration, classification, renewal and account reservation use one clock
+	// snapshot under the same lock. A category cannot expire between these steps.
 	now := s.now()
-	for key, binding := range bindings {
+	for key, binding := range state.Bindings {
 		if !binding.ExpiresAt.After(now) {
-			delete(bindings, key)
+			delete(state.Bindings, key)
 		}
 	}
-	if err := fn(bindings); err != nil {
+	for key, pool := range state.Pools {
+		if !pool.ExpiresAt.After(now) {
+			delete(state.Pools, key)
+		}
+	}
+	if err := fn(&state, now); err != nil {
 		return err
 	}
-	data, err = json.Marshal(bindings)
+	data, err = json.Marshal(state)
 	if err != nil {
 		return err
 	}
@@ -119,30 +175,42 @@ func (s *Store) update(fn func(map[string]Binding) error) error {
 	return os.Rename(tmp.Name(), s.Path)
 }
 
-// ClassifyOnce persists the first category, refreshing the sliding expiration.
-func (s *Store) ClassifyOnce(caller, session, category string) (Binding, error) {
+// Resolve classifies only when the binding is absent/expired, inside the lock.
+func (s *Store) Resolve(caller, session string, classify func() (string, bool)) (Binding, bool, error) {
 	key, err := bindingKey(caller, session)
-	if err != nil || strings.TrimSpace(category) == "" {
-		return Binding{}, errors.New("caller, session and category are required")
+	if err != nil {
+		return Binding{}, false, err
 	}
 	var result Binding
-	err = s.update(func(bindings map[string]Binding) error {
-		result = bindings[key]
+	var resolved bool
+	err = s.update(func(state *routingState, now time.Time) error {
+		result = state.Bindings[key]
 		if result.Category == "" {
-			if len(bindings) >= maxBindings {
+			category, ok := classify()
+			if !ok || strings.TrimSpace(category) == "" {
+				return nil
+			}
+			if len(state.Bindings) >= maxBindings {
 				return errors.New("session routing state capacity reached")
 			}
 			result.Category = category
 		}
-		result.ExpiresAt = s.now().Add(s.TTL)
-		bindings[key] = result
+		result.ExpiresAt = now.Add(s.TTL)
+		state.Bindings[key] = result
+		resolved = true
 		return nil
 	})
-	return result, err
+	return result, resolved, err
 }
 
-// Pick reserves one available candidate atomically, or defers to the host.
-// A previously bound but unavailable auth is not silently replaced here.
+func (s *Store) ClassifyOnce(caller, session, category string) (Binding, error) {
+	if strings.TrimSpace(category) == "" {
+		return Binding{}, errors.New("category is required")
+	}
+	binding, _, err := s.Resolve(caller, session, func() (string, bool) { return category, true })
+	return binding, err
+}
+
 func (s *Store) Pick(caller, session string, categories map[string]Route, candidates []Candidate) (string, bool, error) {
 	key, err := bindingKey(caller, session)
 	if err != nil {
@@ -156,8 +224,8 @@ func (s *Store) PickKey(key string, categories map[string]Route, candidates []Ca
 		return "", false, errors.New("invalid binding key")
 	}
 	var selected string
-	err := s.update(func(bindings map[string]Binding) error {
-		binding, ok := bindings[key]
+	err := s.update(func(state *routingState, now time.Time) error {
+		binding, ok := state.Bindings[key]
 		if !ok {
 			return nil
 		}
@@ -165,21 +233,25 @@ func (s *Store) PickKey(key string, categories map[string]Route, candidates []Ca
 		if !ok {
 			return nil
 		}
-		binding.ExpiresAt = s.now().Add(s.TTL)
-		bindings[key] = binding
+		binding.ExpiresAt = now.Add(s.TTL)
+		state.Bindings[key] = binding
 		if binding.AuthID != "" {
 			for _, candidate := range candidates {
-				if candidate.ID == binding.AuthID {
+				if candidate.ID == binding.AuthID && candidate.weight() > 0 {
 					selected = candidate.ID
-					return nil
+					break
 				}
 			}
 			return nil
 		}
-		selected = choose(route, candidates)
+		var err error
+		selected, err = choose(route, candidates, binding.Category, state.Pools, now.Add(s.TTL))
+		if err != nil {
+			return err
+		}
 		if selected != "" {
 			binding.AuthID = selected
-			bindings[key] = binding
+			state.Bindings[key] = binding
 		}
 		return nil
 	})
@@ -192,14 +264,10 @@ func (s *Store) LookupKey(key string) (Binding, bool, error) {
 	}
 	var result Binding
 	var ok bool
-	err := s.update(func(bindings map[string]Binding) error {
-		result, ok = bindings[key]
-		return nil
-	})
+	err := s.update(func(state *routingState, _ time.Time) error { result, ok = state.Bindings[key]; return nil })
 	return result, ok, err
 }
 
-// TouchExistingKey refreshes activity without creating a state file or binding.
 func (s *Store) TouchExistingKey(key string) error {
 	if !validKey(key) {
 		return errors.New("invalid binding key")
@@ -210,33 +278,43 @@ func (s *Store) TouchExistingKey(key string) error {
 		}
 		return err
 	}
-	return s.update(func(bindings map[string]Binding) error {
-		if binding, ok := bindings[key]; ok {
-			binding.ExpiresAt = s.now().Add(s.TTL)
-			bindings[key] = binding
+	return s.update(func(state *routingState, now time.Time) error {
+		if binding, ok := state.Bindings[key]; ok {
+			binding.ExpiresAt = now.Add(s.TTL)
+			state.Bindings[key] = binding
 		}
 		return nil
 	})
 }
 
-func choose(route Route, candidates []Candidate) string {
+func (c Candidate) weight() int64 {
+	if c.Weight == nil {
+		return 1
+	}
+	if *c.Weight < 0 || *c.Weight > maxWeight {
+		return 0
+	}
+	return *c.Weight
+}
+
+func choose(route Route, candidates []Candidate, category string, pools map[string]poolState, expires time.Time) (string, error) {
 	byID := make(map[string]Candidate, len(candidates))
-	for _, candidate := range candidates {
-		if candidate.ID != "" && !contains(route.ExcludeAuthIDs, candidate.ID) && (route.MaxPriority == nil || candidate.Priority <= *route.MaxPriority) {
-			byID[candidate.ID] = candidate
+	for _, c := range candidates {
+		if c.ID != "" && c.weight() > 0 && !contains(route.ExcludeAuthIDs, c.ID) && (route.MaxPriority == nil || c.Priority <= *route.MaxPriority) {
+			byID[c.ID] = c
 		}
 	}
 	for _, id := range route.PreferredAuthIDs {
 		if _, ok := byID[id]; ok {
-			return id
+			return id, nil
 		}
 	}
-	if route.MaxPriority == nil {
-		return ""
+	if route.MaxPriority == nil || len(byID) == 0 {
+		return "", nil
 	}
 	eligible := make([]Candidate, 0, len(byID))
-	for _, candidate := range byID {
-		eligible = append(eligible, candidate)
+	for _, c := range byID {
+		eligible = append(eligible, c)
 	}
 	sort.Slice(eligible, func(i, j int) bool {
 		if eligible[i].Priority != eligible[j].Priority {
@@ -244,31 +322,78 @@ func choose(route Route, candidates []Candidate) string {
 		}
 		return eligible[i].ID < eligible[j].ID
 	})
-	if len(eligible) == 0 {
-		return ""
+	end := 1
+	for end < len(eligible) && eligible[end].Priority == eligible[0].Priority {
+		end++
 	}
-	return eligible[0].ID
+	eligible = eligible[:end]
+	poolKey, _ := bindingKey(category, strconv.Itoa(eligible[0].Priority))
+	if len(eligible) > maxPoolEntries || len(pools) >= maxPoolEntries && pools[poolKey].Credits == nil {
+		return "", errors.New("routing pool capacity reached")
+	}
+	pool := pools[poolKey]
+	if pool.Credits == nil {
+		pool.Credits = make(map[string]poolCredit)
+	}
+	// A temporary candidate subset is not a configuration change: keep absent
+	// accounts' credits, as CPA's smooth weighted selector does.
+	for _, c := range eligible {
+		if old, ok := pool.Credits[c.ID]; ok && old.Weight != c.weight() {
+			for id, credit := range pool.Credits {
+				credit.Current = 0
+				pool.Credits[id] = credit
+			}
+			break
+		}
+	}
+	var total int64
+	best := eligible[0].ID
+	for _, c := range eligible {
+		credit := pool.Credits[c.ID]
+		credit.Weight = c.weight()
+		credit.Current += credit.Weight
+		pool.Credits[c.ID] = credit
+		total += credit.Weight
+		if credit.Current > pool.Credits[best].Current {
+			best = c.ID
+		}
+	}
+	credit := pool.Credits[best]
+	credit.Current -= total
+	pool.Credits[best] = credit
+	if len(pool.Credits) > maxPoolEntries {
+		active := make(map[string]bool, len(eligible))
+		for _, candidate := range eligible {
+			active[candidate.ID] = true
+		}
+		for id := range pool.Credits {
+			if !active[id] {
+				delete(pool.Credits, id)
+			}
+		}
+	}
+	pool.ExpiresAt = expires
+	pools[poolKey] = pool
+	return best, nil
 }
 
-// RecordFallback uses compare-and-swap so stale completions cannot overwrite a
-// binding changed concurrently by another request or plugin instance.
 func (s *Store) RecordFallback(caller, session, expectedAuthID, actualAuthID string) error {
 	key, err := bindingKey(caller, session)
-	if err != nil || strings.TrimSpace(actualAuthID) == "" {
-		return fmt.Errorf("invalid fallback identity")
+	if err != nil {
+		return err
 	}
 	return s.RecordFallbackKey(key, expectedAuthID, actualAuthID)
 }
 
 func (s *Store) RecordFallbackKey(key, expectedAuthID, actualAuthID string) error {
 	if !validKey(key) || strings.TrimSpace(actualAuthID) == "" {
-		return errors.New("invalid fallback identity")
+		return fmt.Errorf("invalid fallback identity")
 	}
-	return s.update(func(bindings map[string]Binding) error {
-		if binding, ok := bindings[key]; ok && binding.AuthID == expectedAuthID {
+	return s.update(func(state *routingState, now time.Time) error {
+		if binding, ok := state.Bindings[key]; ok && binding.AuthID == expectedAuthID {
 			binding.AuthID = actualAuthID
-			binding.ExpiresAt = s.now().Add(s.TTL)
-			bindings[key] = binding
+			binding.ExpiresAt = now.Add(s.TTL)
+			state.Bindings[key] = binding
 		}
 		return nil
 	})

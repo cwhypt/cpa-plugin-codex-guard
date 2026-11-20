@@ -101,19 +101,22 @@ type RequestInterceptRequest struct {
 	CallerScope     string         `json:"CallerScope,omitempty"`
 }
 
+type SchedulerCandidate struct {
+	ID         string            `json:"ID"`
+	Provider   string            `json:"Provider"`
+	Priority   int               `json:"Priority"`
+	Status     string            `json:"Status"`
+	Attributes map[string]string `json:"Attributes"`
+	Metadata   map[string]any    `json:"Metadata"`
+}
+
 type SchedulerPickRequest struct {
 	Model   string `json:"Model"`
 	Options struct {
 		Headers  http.Header    `json:"Headers"`
 		Metadata map[string]any `json:"Metadata"`
 	} `json:"Options"`
-	Candidates []struct {
-		ID         string            `json:"ID"`
-		Provider   string            `json:"Provider"`
-		Priority   int               `json:"Priority"`
-		Status     string            `json:"Status"`
-		Attributes map[string]string `json:"Attributes"`
-	} `json:"Candidates"`
+	Candidates []SchedulerCandidate `json:"Candidates"`
 }
 
 type SchedulerPickResponse struct {

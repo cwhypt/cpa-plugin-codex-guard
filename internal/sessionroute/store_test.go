@@ -87,7 +87,7 @@ func TestConcurrentFirstClassificationAndPick(t *testing.T) {
 func TestProbePoolAndCorruptState(t *testing.T) {
 	max := 6
 	route := Route{MaxPriority: &max, ExcludeAuthIDs: []string{"excluded"}}
-	if got := choose(route, []Candidate{{ID: "high", Priority: 7}, {ID: "excluded", Priority: 6}, {ID: "low", Priority: 4}, {ID: "preferred", Priority: 5}}); got != "preferred" {
+	if got, err := choose(route, []Candidate{{ID: "high", Priority: 7}, {ID: "excluded", Priority: 6}, {ID: "low", Priority: 4}, {ID: "preferred", Priority: 5}}, "probe", map[string]poolState{}, time.Now().Add(time.Hour)); err != nil || got != "preferred" {
 		t.Fatalf("unexpected probe candidate: %q", got)
 	}
 	path := filepath.Join(t.TempDir(), "state.json")

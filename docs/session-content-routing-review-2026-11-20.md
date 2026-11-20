@@ -2,6 +2,8 @@
 
 Reviewed commit: `702fbc6` (`git diff a3a63a4...702fbc6`). This is a source review of the new implementation, not a live deployment test. Existing unstaged README and probe-replay changes were excluded from the review scope.
 
+**Follow-up:** all six findings below are addressed in the subsequent source revision. This document preserves the original review evidence; current behavior and regression coverage are described in `session-content-routing.md`, including first-user classification, context-restricted probes, canonical sessions and persistent weighted rotation.
+
 The latest user decisions override the earlier plan: cache/local computation precedes classification; cache hits must not select or call accounts; plugin priority may select Guard's Scheduler independently of Key Policy frontend authentication. No application-source fixes are included in this review.
 
 ## Standards / implementation correctness
