@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"time"
+
+	"cpa-codex-guard/internal/sessionroute"
 )
 
 type Config struct {
@@ -25,7 +27,8 @@ type Config struct {
 	ProbeMinSamples     int    `json:"probe_min_samples" yaml:"probe_min_samples"`
 
 	// 诊断日志开关（默认 true）。关闭后 debugLog 直接丢弃，避免磁盘/fd 开销。
-	DebugLogEnabled *bool `json:"debug_log_enabled" yaml:"debug_log_enabled"`
+	DebugLogEnabled *bool                `json:"debug_log_enabled" yaml:"debug_log_enabled"`
+	SessionRouting  *sessionroute.Config `json:"session_routing" yaml:"session_routing"`
 }
 
 func DefaultConfig() *Config {

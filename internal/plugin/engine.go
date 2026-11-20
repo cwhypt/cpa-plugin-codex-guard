@@ -12,6 +12,7 @@ import (
 
 	"cpa-codex-guard/internal/guard"
 	"cpa-codex-guard/internal/probecache"
+	"cpa-codex-guard/internal/sessionroute"
 	"cpa-codex-guard/internal/state"
 	"cpa-codex-guard/internal/types"
 	"gopkg.in/yaml.v3"
@@ -70,6 +71,7 @@ type Engine struct {
 
 	claudeSnapshotMu sync.Mutex
 	claudeSnapshots  map[string]claudeThinkingSnapshot
+	sessionRouter    *sessionRouter
 
 	debugMu     sync.Mutex
 	debugCapped bool
@@ -87,6 +89,9 @@ type pendingInfo struct {
 	claudeModel   string
 	claudeRawSSE  strings.Builder
 	claudeStream  bool
+	routeKey      string
+	routeExpected string
+	routeCaller   string
 	// streamText accumulates SSE delta text while the stream is in flight.
 	streamText strings.Builder
 	// chunkCount tracks how many SSE data frames were seen (diagnostics).
@@ -184,6 +189,8 @@ func (e *Engine) HandleMethod(method string, request []byte) (out []byte, err er
 		return e.handleStreamChunk(request)
 	case types.MethodRequestComplete:
 		return e.handleRequestComplete(request)
+	case "scheduler.pick":
+		return e.handleSessionRoutePick(request)
 	default:
 		return json.Marshal(types.Envelope{
 			OK: false,
@@ -209,6 +216,24 @@ func (e *Engine) applyConfig(request []byte) error {
 			return fmt.Errorf("decode plugin config: %w", err)
 		}
 	}
+	var router *sessionRouter
+	if cfg.SessionRouting != nil && cfg.SessionRouting.Enabled {
+		if err := cfg.SessionRouting.Compile(); err != nil {
+			return fmt.Errorf("invalid session routing config: %w", err)
+		}
+		routePath, err := filepath.Abs(cfg.SessionRouting.StateFile)
+		if err != nil {
+			return fmt.Errorf("session routing state path: %w", err)
+		}
+		for _, path := range []string{cfg.StateFile, cfg.ProbeStateFile} {
+			otherPath, err := filepath.Abs(path)
+			if err == nil && routePath == otherPath {
+				return fmt.Errorf("session routing requires a separate state_file")
+			}
+		}
+		ttl, _ := time.ParseDuration(cfg.SessionRouting.BindingTTL)
+		router = &sessionRouter{config: cfg.SessionRouting, store: &sessionroute.Store{Path: cfg.SessionRouting.StateFile, TTL: ttl}}
+	}
 	store := state.NewStore(cfg.StateFile, cfg.ParseTTL(), cfg.ParseCircuitTTL())
 	checker := guard.NewChecker(
 		store,
@@ -228,6 +253,7 @@ func (e *Engine) applyConfig(request []byte) error {
 	e.store = store
 	e.checker = checker
 	e.probeEngine = probeEngine
+	e.sessionRouter = router
 	e.mu.Unlock()
 	return nil
 }
@@ -244,6 +270,9 @@ func (e *Engine) configError(err error) ([]byte, error) {
 }
 
 func (e *Engine) handleRegister(request []byte) ([]byte, error) {
+	e.mu.RLock()
+	schedulerEnabled := e.sessionRouter != nil
+	e.mu.RUnlock()
 	reg := types.Registration{
 		SchemaVersion: types.SchemaVersion,
 		Metadata: types.Metadata{
@@ -264,14 +293,17 @@ func (e *Engine) handleRegister(request []byte) ([]byte, error) {
 				{Name: "fuzzy_circuit_breaker", Type: "boolean", Description: "Enable session-level fuzzy similarity circuit breaker"},
 				{Name: "probe_cache_enabled", Type: "boolean", Description: "Enable caching and randomized playback for probe traffic"},
 				{Name: "probe_cache_ttl", Type: "string", Description: "Probe cache TTL (default 120h / 5 days; use Go duration such as 120h)"},
+				{Name: "session_routing", Type: "object", Description: "Optional configurable content classification and persistent session account routing for authenticated callers and included models"},
 				{Name: "debug_log_enabled", Type: "boolean", Description: "Enable diagnostic debug log (default true, capped at 50MB)"},
 			},
 		},
 		Capabilities: types.Capabilities{
-			RequestInterceptor:     true,
-			ResponseInterceptor:    true,
-			RequestLifecyclePlugin: true,
-			StreamChunkInterceptor: true,
+			RequestInterceptor:        true,
+			ResponseInterceptor:       true,
+			RequestLifecyclePlugin:    true,
+			StreamChunkInterceptor:    true,
+			Scheduler:                 schedulerEnabled,
+			SchedulerAcrossPriorities: schedulerEnabled,
 		},
 	}
 
@@ -297,7 +329,7 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	e.mu.RUnlock()
 
 	res := checker.CheckRequest(&req)
-	if res != nil {
+	if res != nil && res.Terminate {
 		if res.RuleID != "" {
 			e.debugLog("before", fmt.Sprintf("BLOCK rule=%s reqId=%s model=%s", res.RuleID, req.RequestID, req.Model))
 		}
@@ -312,6 +344,9 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 	}
 
 	reqBody := req.GetRequestBody()
+	if res != nil && len(res.Body) > 0 {
+		reqBody = res.Body
+	}
 	claudeModel, isClaude := claudeRequestModel(reqBody, req.Model)
 	claudeSession := claudeSessionID(req.GetHeaders())
 	if cfg.IsBlockInvalidClaudeRequests() && isClaude {
@@ -344,6 +379,7 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 			response := probeEng.FormatResponse(&probecache.Sample{Text: answer, RawResponse: raw}, req.Stream, "responses", req.Model)
 			if response != nil {
 				if encoded, err := json.Marshal(response); err == nil {
+					e.refreshCachedSessionRoute(&req, reqBody)
 					return json.Marshal(types.Envelope{OK: true, Result: encoded})
 				}
 			}
@@ -357,6 +393,7 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 				if probeResp != nil {
 					resBytes, err := json.Marshal(probeResp)
 					if err == nil {
+						e.refreshCachedSessionRoute(&req, reqBody)
 						return json.Marshal(types.Envelope{
 							OK:     true,
 							Result: resBytes,
@@ -388,6 +425,17 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 		}
 	}
 
+	routeHeaders, routeClear := e.prepareSessionRoute(&req, reqBody)
+	if routeHeaders != nil || len(routeClear) > 0 || res != nil {
+		if res == nil {
+			res = &types.RequestInterceptResponse{}
+		}
+		res.Headers, res.ClearHeaders = routeHeaders, routeClear
+		result, err := json.Marshal(res)
+		if err == nil {
+			return json.Marshal(types.Envelope{OK: true, Result: result})
+		}
+	}
 	return e.okEmptyResponse()
 }
 
@@ -395,7 +443,15 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 // execution. Its Body is the rewritten upstream payload — NOT a response. There
 // is no response data available here, so nothing is observed or recorded.
 func (e *Engine) handleRequestInterceptAfter(request []byte) ([]byte, error) {
-	return e.okEmptyResponse()
+	var req types.RequestInterceptRequest
+	if len(request) > 0 && json.Unmarshal(request, &req) == nil {
+		e.finishSessionRouteSelection(req.RequestID, req.Metadata)
+	}
+	if !hasInternalRouteHeader(req.GetHeaders()) {
+		return e.okEmptyResponse()
+	}
+	result, _ := json.Marshal(types.RequestInterceptResponse{ClearHeaders: []string{internalRouteHeader}})
+	return json.Marshal(types.Envelope{OK: true, Result: result})
 }
 
 // handleResponseInterceptAfter fires only for successful non-streaming

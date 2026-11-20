@@ -69,10 +69,12 @@ type ConfigField struct {
 }
 
 type Capabilities struct {
-	RequestInterceptor     bool `json:"request_interceptor"`
-	ResponseInterceptor    bool `json:"response_interceptor"`
-	RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
-	StreamChunkInterceptor bool `json:"response_stream_interceptor"`
+	RequestInterceptor        bool `json:"request_interceptor"`
+	ResponseInterceptor       bool `json:"response_interceptor"`
+	RequestLifecyclePlugin    bool `json:"request_lifecycle_plugin"`
+	StreamChunkInterceptor    bool `json:"response_stream_interceptor"`
+	Scheduler                 bool `json:"scheduler,omitempty"`
+	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities,omitempty"`
 }
 
 type LifecycleRequest struct {
@@ -96,6 +98,27 @@ type RequestInterceptRequest struct {
 	ResponseHeaders http.Header    `json:"ResponseHeaders,omitempty"`
 	ResponseBody    []byte         `json:"ResponseBody,omitempty"`
 	Metadata        map[string]any `json:"Metadata,omitempty"`
+	CallerScope     string         `json:"CallerScope,omitempty"`
+}
+
+type SchedulerPickRequest struct {
+	Model   string `json:"Model"`
+	Options struct {
+		Headers  http.Header    `json:"Headers"`
+		Metadata map[string]any `json:"Metadata"`
+	} `json:"Options"`
+	Candidates []struct {
+		ID         string            `json:"ID"`
+		Provider   string            `json:"Provider"`
+		Priority   int               `json:"Priority"`
+		Status     string            `json:"Status"`
+		Attributes map[string]string `json:"Attributes"`
+	} `json:"Candidates"`
+}
+
+type SchedulerPickResponse struct {
+	AuthID  string `json:"AuthID,omitempty"`
+	Handled bool   `json:"Handled"`
 }
 
 func (r *RequestInterceptRequest) GetRequestBody() []byte {
