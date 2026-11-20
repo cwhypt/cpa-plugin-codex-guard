@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -251,6 +252,41 @@ func (s *Store) PickKey(key string, categories map[string]Route, candidates []Ca
 		}
 		if selected != "" {
 			binding.AuthID = selected
+			state.Bindings[key] = binding
+		}
+		return nil
+	})
+	return selected, selected != "", err
+}
+
+// PickProtectedFallback preserves priority/weight semantics after reserved auths
+// are removed. Returning to the host with the unfiltered pool would undo that
+// protection. Allocation and any existing binding update share one transaction.
+func (s *Store) PickProtectedFallback(key, model string, candidates []Candidate) (string, bool, error) {
+	if key != "" && !validKey(key) {
+		return "", false, errors.New("invalid fallback binding key")
+	}
+	var selected string
+	err := s.update(func(state *routingState, now time.Time) error {
+		if binding, ok := state.Bindings[key]; ok && binding.AuthID != "" {
+			for _, candidate := range candidates {
+				if candidate.ID == binding.AuthID && candidate.weight() > 0 {
+					selected = candidate.ID
+					binding.ExpiresAt = now.Add(s.TTL)
+					state.Bindings[key] = binding
+					return nil
+				}
+			}
+		}
+		max := math.MaxInt
+		var err error
+		selected, err = choose(Route{MaxPriority: &max}, candidates, "protected-fallback:"+model, state.Pools, now.Add(s.TTL))
+		if err != nil {
+			return err
+		}
+		if binding, ok := state.Bindings[key]; ok && selected != "" {
+			binding.AuthID = selected
+			binding.ExpiresAt = now.Add(s.TTL)
 			state.Bindings[key] = binding
 		}
 		return nil

@@ -7,19 +7,34 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Config is intended to be embedded under session_routing in plugin YAML.
 // No account identifiers or classification rules are compiled into the plugin.
 type Config struct {
-	Enabled         bool             `yaml:"enabled" json:"enabled"`
-	DefaultCategory string           `yaml:"default_category" json:"default_category"`
-	Rules           []Rule           `yaml:"rules" json:"rules"`
-	Categories      map[string]Route `yaml:"categories" json:"categories"`
-	BindingTTL      string           `yaml:"binding_ttl" json:"binding_ttl"`
-	StateFile       string           `yaml:"state_file" json:"state_file"`
-	ModelInclude    string           `yaml:"model_include_regex" json:"model_include_regex"`
+	Enabled         bool                     `yaml:"enabled" json:"enabled"`
+	DefaultCategory string                   `yaml:"default_category" json:"default_category"`
+	Rules           []Rule                   `yaml:"rules" json:"rules"`
+	Categories      map[string]Route         `yaml:"categories" json:"categories"`
+	BindingTTL      string                   `yaml:"binding_ttl" json:"binding_ttl"`
+	StateFile       string                   `yaml:"state_file" json:"state_file"`
+	ModelInclude    string                   `yaml:"model_include_regex" json:"model_include_regex"`
+	ProtectedAuths  map[string]AuthAdmission `yaml:"protected_auths" json:"protected_auths"`
 	compiledModel   *regexp.Regexp
+}
+
+// AuthAdmission limits which session categories/models may borrow a reserved
+// credential, including fallback selections. It never infers quality itself.
+type AuthAdmission struct {
+	Categories    []string `yaml:"categories" json:"categories"`
+	ModelInclude  string   `yaml:"model_include_regex" json:"model_include_regex"`
+	compiledModel *regexp.Regexp
+}
+
+func (c *Config) AllowsAuth(id, category, model string) bool {
+	admission, protected := c.ProtectedAuths[id]
+	return !protected || category != "" && contains(admission.Categories, category) && admission.compiledModel != nil && admission.compiledModel.MatchString(model)
 }
 
 type Route struct {
@@ -29,16 +44,21 @@ type Route struct {
 }
 
 type Rule struct {
-	Category      string   `yaml:"category" json:"category"`
-	Models        []string `yaml:"models" json:"models"`
-	UserAgent     string   `yaml:"user_agent_regex" json:"user_agent_regex"`
-	TextAll       []string `yaml:"text_all_regex" json:"text_all_regex"`
-	Standalone    bool     `yaml:"standalone" json:"standalone"`
-	DisallowTools bool     `yaml:"disallow_tools" json:"disallow_tools"`
-	MaxInputBytes int      `yaml:"max_input_bytes" json:"max_input_bytes"`
-	CallerScopes  []string `yaml:"caller_scopes" json:"caller_scopes"`
-	compiledUA    *regexp.Regexp
-	compiledTexts []*regexp.Regexp
+	Category         string   `yaml:"category" json:"category"`
+	Models           []string `yaml:"models" json:"models"`
+	ModelInclude     string   `yaml:"model_include_regex" json:"model_include_regex"`
+	ReasoningEfforts []string `yaml:"reasoning_efforts" json:"reasoning_efforts"`
+	MinUserChars     int      `yaml:"min_user_chars" json:"min_user_chars"`
+	MinContextChars  int      `yaml:"min_context_chars" json:"min_context_chars"`
+	UserAgent        string   `yaml:"user_agent_regex" json:"user_agent_regex"`
+	TextAll          []string `yaml:"text_all_regex" json:"text_all_regex"`
+	Standalone       bool     `yaml:"standalone" json:"standalone"`
+	DisallowTools    bool     `yaml:"disallow_tools" json:"disallow_tools"`
+	MaxInputBytes    int      `yaml:"max_input_bytes" json:"max_input_bytes"`
+	CallerScopes     []string `yaml:"caller_scopes" json:"caller_scopes"`
+	compiledUA       *regexp.Regexp
+	compiledModel    *regexp.Regexp
+	compiledTexts    []*regexp.Regexp
 }
 
 // Compile validates and compiles configuration before publishing it to callers.
@@ -79,13 +99,45 @@ func (c *Config) Compile() error {
 			}
 		}
 	}
+	for id, admission := range c.ProtectedAuths {
+		if id == "" || strings.TrimSpace(id) != id || len(admission.Categories) == 0 || admission.ModelInclude == "" {
+			return fmt.Errorf("protected auth requires an exact ID, categories and model_include_regex")
+		}
+		for _, category := range admission.Categories {
+			if _, ok := c.Categories[category]; !ok || category == "" {
+				return fmt.Errorf("protected auth references unknown category %q", category)
+			}
+		}
+		compiled, err := regexp.Compile(admission.ModelInclude)
+		if err != nil {
+			return fmt.Errorf("protected auth model_include_regex: %w", err)
+		}
+		admission.compiledModel = compiled
+		c.ProtectedAuths[id] = admission
+	}
 	for i := range c.Rules {
 		rule := &c.Rules[i]
 		if _, ok := c.Categories[rule.Category]; !ok || rule.Category == "" {
 			return fmt.Errorf("rule %d references an unknown category", i)
 		}
-		if len(rule.TextAll) == 0 {
-			return fmt.Errorf("rule %d must match user text", i)
+		if rule.MinUserChars < 0 || rule.MinContextChars < 0 || rule.MinUserChars > 15*1024*1024 || rule.MinContextChars > 15*1024*1024 {
+			return fmt.Errorf("rule %d has an invalid minimum text length", i)
+		}
+		if len(rule.TextAll) == 0 && (rule.MinUserChars == 0 && rule.MinContextChars == 0 || len(rule.ReasoningEfforts) == 0 || rule.ModelInclude == "" && len(rule.Models) == 0) {
+			return fmt.Errorf("rule %d needs user text patterns or model, effort and minimum text length constraints", i)
+		}
+		for _, effort := range rule.ReasoningEfforts {
+			if effort == "" || strings.TrimSpace(effort) != effort {
+				return fmt.Errorf("rule %d contains an invalid reasoning effort", i)
+			}
+		}
+		rule.compiledModel = nil
+		if rule.ModelInclude != "" {
+			compiled, err := regexp.Compile(rule.ModelInclude)
+			if err != nil {
+				return fmt.Errorf("rule %d model_include_regex: %w", i, err)
+			}
+			rule.compiledModel = compiled
 		}
 		if rule.MaxInputBytes < 0 || rule.MaxInputBytes > 15*1024*1024 {
 			return fmt.Errorf("rule %d max_input_bytes must be between 0 and 15 MiB", i)
@@ -95,7 +147,7 @@ func (c *Config) Compile() error {
 				return fmt.Errorf("rule %d contains an empty or padded caller scope", i)
 			}
 		}
-		if c.Categories[rule.Category].MaxPriority != nil && (!rule.Standalone || rule.MaxInputBytes == 0 || rule.UserAgent == "" && len(rule.CallerScopes) == 0) {
+		if c.Categories[rule.Category].MaxPriority != nil && (len(rule.TextAll) == 0 || !rule.Standalone || rule.MaxInputBytes == 0 || rule.UserAgent == "" && len(rule.CallerScopes) == 0) {
 			return fmt.Errorf("rule %d priority pool requires standalone, max_input_bytes and user_agent_regex or caller_scopes", i)
 		}
 		rule.compiledUA = nil
@@ -130,6 +182,10 @@ func (c *Config) Classify(model, userAgent string, body []byte) (category string
 // ClassifyForCaller uses the first effective user message of a newly observed
 // session. Context constraints inspect the entire request, never just that text.
 func (c *Config) ClassifyForCaller(model, userAgent, caller string, body []byte) (category string, ok bool) {
+	return c.ClassifyWithMetadata(model, userAgent, caller, body, nil)
+}
+
+func (c *Config) ClassifyWithMetadata(model, userAgent, caller string, body []byte, metadata map[string]any) (category string, ok bool) {
 	if !c.IncludesModel(model) || len(body) == 0 || len(body) > 15*1024*1024 {
 		return "", false
 	}
@@ -137,7 +193,20 @@ func (c *Config) ClassifyForCaller(model, userAgent, caller string, body []byte)
 	if !ok {
 		return "", false
 	}
+	effort := reasoningEffort(body, metadata)
+	contextChars := -1
 	for _, rule := range c.Rules {
+		if rule.compiledModel != nil && !rule.compiledModel.MatchString(model) || len(rule.ReasoningEfforts) > 0 && !contains(rule.ReasoningEfforts, effort) || utf8.RuneCountInString(strings.TrimSpace(text)) < rule.MinUserChars {
+			continue
+		}
+		if rule.MinContextChars > 0 {
+			if contextChars < 0 {
+				contextChars = ConversationChars(body)
+			}
+			if contextChars < rule.MinContextChars {
+				continue
+			}
+		}
 		if rule.Standalone && (!standalone || hasTools) || rule.DisallowTools && hasTools || rule.MaxInputBytes > 0 && len(body) > rule.MaxInputBytes {
 			continue
 		}
@@ -150,7 +219,7 @@ func (c *Config) ClassifyForCaller(model, userAgent, caller string, body []byte)
 		if rule.compiledUA != nil && !rule.compiledUA.MatchString(userAgent) {
 			continue
 		}
-		matched := len(rule.compiledTexts) == len(rule.TextAll) && len(rule.compiledTexts) > 0
+		matched := len(rule.compiledTexts) == len(rule.TextAll)
 		for _, pattern := range rule.compiledTexts {
 			if !pattern.MatchString(text) {
 				matched = false
@@ -162,6 +231,87 @@ func (c *Config) ClassifyForCaller(model, userAgent, caller string, body []byte)
 		}
 	}
 	return c.DefaultCategory, true
+}
+
+func reasoningEffort(body []byte, metadata map[string]any) string {
+	var root struct {
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		Effort string `json:"reasoning_effort"`
+	}
+	if json.Unmarshal(body, &root) != nil {
+		return ""
+	}
+	if effort := strings.TrimSpace(root.Reasoning.Effort); effort != "" {
+		return effort
+	}
+	if effort := strings.TrimSpace(root.Effort); effort != "" {
+		return effort
+	}
+	value, _ := metadata["reasoning_effort"].(string)
+	return strings.TrimSpace(value)
+}
+
+// ConversationChars measures visible conversation context, not JSON size. It
+// excludes system/developer instructions, tool definitions, call arguments,
+// images/base64, and encrypted reasoning. Tool result text is real context.
+func ConversationChars(body []byte) int {
+	var root struct {
+		Input    json.RawMessage `json:"input"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if json.Unmarshal(body, &root) != nil {
+		return 0
+	}
+	raw := root.Messages
+	if len(root.Input) > 0 {
+		raw = root.Input
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return utf8.RuneCountInString(strings.TrimSpace(text))
+	}
+	var items []struct {
+		Role    string          `json:"role"`
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+		Output  json.RawMessage `json:"output"`
+	}
+	if json.Unmarshal(raw, &items) != nil {
+		return 0
+	}
+	count := 0
+	for _, item := range items {
+		if item.Role == "system" || item.Role == "developer" {
+			continue
+		}
+		if item.Type == "function_call_output" {
+			if json.Unmarshal(item.Output, &text) == nil {
+				count += utf8.RuneCountInString(strings.TrimSpace(text))
+			}
+		}
+		if item.Role != "user" && item.Role != "assistant" && item.Role != "tool" && item.Role != "function" {
+			continue
+		}
+		if json.Unmarshal(item.Content, &text) == nil {
+			count += utf8.RuneCountInString(strings.TrimSpace(text))
+			continue
+		}
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(item.Content, &parts) != nil {
+			continue
+		}
+		for _, part := range parts {
+			if part.Type == "text" || part.Type == "input_text" || part.Type == "output_text" {
+				count += utf8.RuneCountInString(strings.TrimSpace(part.Text))
+			}
+		}
+	}
+	return count
 }
 
 func (c *Config) IncludesModel(model string) bool {

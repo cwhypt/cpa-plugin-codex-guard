@@ -120,8 +120,11 @@ type SchedulerPickRequest struct {
 }
 
 type SchedulerPickResponse struct {
-	AuthID  string `json:"AuthID,omitempty"`
-	Handled bool   `json:"Handled"`
+	AuthID       string `json:"AuthID,omitempty"`
+	Handled      bool   `json:"Handled"`
+	Reject       bool   `json:"Reject,omitempty"`
+	RejectCode   string `json:"RejectCode,omitempty"`
+	RejectReason string `json:"RejectReason,omitempty"`
 }
 
 func (r *RequestInterceptRequest) GetRequestBody() []byte {

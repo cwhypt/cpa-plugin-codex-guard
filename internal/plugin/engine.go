@@ -92,6 +92,7 @@ type pendingInfo struct {
 	routeKey      string
 	routeExpected string
 	routeCaller   string
+	routeCategory string
 	// streamText accumulates SSE delta text while the stream is in flight.
 	streamText strings.Builder
 	// chunkCount tracks how many SSE data frames were seen (diagnostics).

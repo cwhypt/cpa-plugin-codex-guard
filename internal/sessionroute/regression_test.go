@@ -249,3 +249,40 @@ func TestUnsafePoolRulesRejectConfiguration(t *testing.T) {
 		t.Fatal("pool default permits uncertain context to become a probe")
 	}
 }
+
+func TestProtectedFallbackReservationIsAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	s := &Store{Path: path, TTL: time.Hour}
+	_, _ = s.ClassifyOnce("caller", "session", "general")
+	key, _ := Key("caller", "session")
+	if err := s.RecordFallbackKey(key, "", "reserved"); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []Candidate{{ID: "a", Priority: 3}, {ID: "b", Priority: 3}}
+	results := make(chan string, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store := &Store{Path: path, TTL: time.Hour}
+			id, ok, err := store.PickProtectedFallback(key, "gpt-test", candidates)
+			if err != nil || !ok {
+				t.Errorf("protected fallback: %v %v", ok, err)
+				return
+			}
+			results <- id
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for id := range results {
+		if id != "a" {
+			t.Fatalf("concurrent fallback changed first binding: %q", id)
+		}
+	}
+	id, ok, err := s.PickProtectedFallback("", "gpt-test", candidates)
+	if err != nil || !ok || id != "b" {
+		t.Fatalf("sticky fallback consumed rotation credits: %q %v %v", id, ok, err)
+	}
+}

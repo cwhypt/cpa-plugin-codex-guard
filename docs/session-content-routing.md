@@ -11,6 +11,8 @@
 
 Routing is optional and disabled unless `session_routing.enabled` is true. It also works when `probe_cache_enabled` is false. Routing does not change the existing cache's key or sample policy.
 
+The additional reserved-quality-account policy, measured thresholds, full configuration fragment and protected fallback behavior are documented in [quality-account-routing-2026-11-20.md](quality-account-routing-2026-11-20.md). It splits ordinary astra/sol medium-or-higher traffic by substantive user/context length, while preserving sticky short follow-ups.
+
 ## Configuration example
 
 Merge this into the Guard plugin configuration through YAML or the management panel's full configuration editor. Replace the placeholder **auth IDs** with CPA's exact candidate IDs, not raw API keys, key suffixes, email labels, or account indexes. The example rules are illustrative; tune them to confirmed templates before enabling.
@@ -51,7 +53,7 @@ plugins:
             text_all_regex: ['1\s*(?:到|至|[-–])\s*355', '(?:整数|integer)']
 ```
 
-Rules are ordered: the first match wins. All `text_all_regex` patterns must match the **first effective user text** in the first observed cache-miss request for an unbound/expired session. Optional `models: [model-a, model-b]`, `user_agent_regex` and `caller_scopes: [<opaque CPA caller scope>]` further constrain a rule, but cannot replace a text condition. Unknown categories, invalid regexes, invalid durations and empty/padded auth IDs reject reconfiguration before replacing the active router.
+Rules are ordered: the first match wins. All `text_all_regex` patterns must match the **first effective user text** in the first observed cache-miss request for an unbound/expired session. Optional `models: [model-a, model-b]`, per-rule `model_include_regex`, `reasoning_efforts`, `user_agent_regex` and `caller_scopes: [<opaque CPA caller scope>]` further constrain a rule. A structural length rule can omit text regexes only when it supplies a model constraint, explicit effort list, and positive `min_user_chars` or `min_context_chars`; these are Unicode-character minima, not request-byte sizes. All conditions within a rule are ANDed; use two rules for OR alternatives. Unknown categories, invalid regexes, invalid durations and empty/padded auth IDs reject reconfiguration before replacing the active router.
 
 Rules targeting a `max_priority` pool must specify `standalone: true`, a positive `max_input_bytes` (whole request size), and either `user_agent_regex` or nonempty `caller_scopes`. Pool categories cannot be the default category. `standalone` permits exactly one user message plus optional system/developer messages, and rejects assistant/tool/unknown conversation items, tools/tool choice, `previous_response_id` and conversation references. `disallow_tools` can also constrain non-pool rules. A UA is a configurable client hint, not proof of caller identity; use `caller_scopes` when the rule must be limited to particular authenticated callers. Tighten text regexes to the entire confirmed template instead of copying the illustrative keyword patterns into production.
 
@@ -78,6 +80,7 @@ Changing priority alone does not add Scheduler to an older Guard binary. The exi
 - Each transaction takes a stable sibling `.lock` file lock, reloads the current state, removes expired records, writes and syncs a temporary file, then renames it. Linux/macOS use `flock`; Windows uses `LockFileEx`. Expiration, new classification and renewal use one timestamp inside the same transaction, preventing expired categories from being recreated from a stale lookup. Compatible plugin instances coordinate through the file lock. Fallback writes compare the prior account ID so a stale request cannot blindly replace a newer binding.
 - Invalid state is not overwritten. Read/write/lock failures defer to CPA and emit a diagnostic when Guard debug logging is enabled. There is a limit of 10,000 active bindings and 1,024 active rotation pools/credits per pool; new allocations defer when full. The small bounded JSON store serializes disk transactions; a different store is warranted only if measured traffic makes this a bottleneck.
 - The internal `X-Cpa-Internal-Session-Route` header is replaced on incoming cache-miss requests. Scheduler requires a matching live host request ID and caller scope. After-selection handling removes the header when present, even when routing is disabled; recording fallback does not depend on the header surviving provider rewrites. It emits no header edits when the marker is absent, avoiding unnecessary host session-metadata reconciliation.
+- Optional `protected_auths` maps exact auth IDs to allowed categories and a model regex. Non-admitted reserved IDs are removed from every active Guard Scheduler call, including unclassified/fallback requests. If removal makes host deferral unsafe, Guard uses its own priority/weighted fallback over the remaining candidates, or explicitly rejects when none are usable. See the quality-policy document for that exception to unrestricted host fallback and its runtime boundary.
 
 ## Verification
 
