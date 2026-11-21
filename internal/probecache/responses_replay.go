@@ -80,10 +80,10 @@ func formatResponsesReplay(sample *Sample, stream bool, model string, usage map[
 	}
 	oldResponseID, ok := original["id"].(string)
 	items, itemsOK := original["output"].([]any)
-	if !ok || oldResponseID == "" || !itemsOK || len(items) != 1 {
+	if !ok || oldResponseID == "" || !itemsOK || len(items) == 0 || len(items) > 16 {
 		return nil
 	}
-	item, ok := items[0].(map[string]any)
+	item, ok := items[len(items)-1].(map[string]any)
 	if !ok || item["type"] != "message" || item["role"] != "assistant" || item["status"] != "completed" {
 		return nil
 	}
@@ -103,11 +103,59 @@ func formatResponsesReplay(sample *Sample, stream bool, model string, usage map[
 	if !ok {
 		return nil
 	}
-	itemID, ok := newReplayID("msg_")
-	if !ok {
-		return nil
+	oldIDs := []string{oldResponseID}
+	idMap := make(map[string]string, len(items))
+	for i, value := range items {
+		output, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		oldID, ok := output["id"].(string)
+		if !ok || oldID == "" || idMap[oldID] != "" {
+			return nil
+		}
+		prefix := "msg_"
+		if i != len(items)-1 {
+			if output["type"] != "reasoning" || output["encrypted_content"] != nil && output["encrypted_content"] != "" {
+				return nil
+			}
+			if status, exists := output["status"]; exists && status != nil && status != "completed" {
+				return nil
+			}
+			for key := range output {
+				if key != "type" && key != "id" && key != "summary" && key != "content" && key != "encrypted_content" && key != "status" {
+					return nil
+				}
+			}
+			if content, exists := output["content"]; exists && content != nil {
+				if arr, ok := content.([]any); !ok || len(arr) != 0 {
+					return nil
+				}
+			}
+			summary, ok := output["summary"].([]any)
+			if !ok || len(summary) > 16 {
+				return nil
+			}
+			for _, value := range summary {
+				part, ok := value.(map[string]any)
+				if !ok || len(part) != 2 || part["type"] != "summary_text" {
+					return nil
+				}
+				if _, ok := part["text"].(string); !ok {
+					return nil
+				}
+			}
+			prefix = "rs_"
+		}
+		newID, ok := newReplayID(prefix)
+		if !ok {
+			return nil
+		}
+		idMap[oldID] = newID
+		oldIDs = append(oldIDs, oldID)
+		output["id"] = newID
 	}
-	oldIDs := []string{oldResponseID, oldItemID}
+	itemID := idMap[oldItemID]
 	if attribution, exists := usage["attribution"]; exists && attribution != nil {
 		a, ok := attribution.(map[string]any)
 		if !ok {
@@ -125,8 +173,8 @@ func formatResponsesReplay(sample *Sample, stream bool, model string, usage map[
 			if _, ok := value.(map[string]any); id == "" || !ok {
 				return nil
 			}
-			newID := itemID
-			if id != oldItemID {
+			newID, exists := idMap[id]
+			if !exists {
 				newID, ok = newReplayID("msg_")
 				if !ok {
 					return nil
@@ -137,7 +185,6 @@ func formatResponsesReplay(sample *Sample, stream bool, model string, usage map[
 		}
 		a["items"] = newItems
 	}
-	item["id"] = itemID
 	original["id"] = responseID
 	original["created_at"] = time.Now().Unix()
 	if _, exists := original["completed_at"]; exists {
@@ -174,14 +221,31 @@ func formatResponsesReplay(sample *Sample, stream bool, model string, usage map[
 	events := []map[string]any{
 		{"type": "response.created", "response": created},
 		{"type": "response.in_progress", "response": created},
-		{"type": "response.output_item.added", "output_index": 0, "item": added},
-		{"type": "response.content_part.added", "item_id": itemID, "output_index": 0, "content_index": 0, "part": emptyPart},
-		{"type": "response.output_text.delta", "item_id": itemID, "output_index": 0, "content_index": 0, "delta": sample.Text},
-		{"type": "response.output_text.done", "item_id": itemID, "output_index": 0, "content_index": 0, "text": sample.Text},
-		{"type": "response.content_part.done", "item_id": itemID, "output_index": 0, "content_index": 0, "part": part},
-		{"type": "response.output_item.done", "output_index": 0, "item": item},
-		{"type": "response.completed", "response": original},
 	}
+	for index, value := range items[:len(items)-1] {
+		reasoning := value.(map[string]any)
+		reasonID := reasoning["id"].(string)
+		events = append(events, map[string]any{"type": "response.output_item.added", "output_index": index, "item": map[string]any{"id": reasonID, "type": "reasoning", "summary": []any{}}})
+		for j, value := range reasoning["summary"].([]any) {
+			summary := value.(map[string]any)
+			text := summary["text"].(string)
+			events = append(events,
+				map[string]any{"type": "response.reasoning_summary_part.added", "item_id": reasonID, "output_index": index, "summary_index": j, "part": map[string]any{"type": "summary_text", "text": ""}},
+				map[string]any{"type": "response.reasoning_summary_text.delta", "item_id": reasonID, "output_index": index, "summary_index": j, "delta": text},
+				map[string]any{"type": "response.reasoning_summary_text.done", "item_id": reasonID, "output_index": index, "summary_index": j, "text": text},
+				map[string]any{"type": "response.reasoning_summary_part.done", "item_id": reasonID, "output_index": index, "summary_index": j, "part": summary})
+		}
+		events = append(events, map[string]any{"type": "response.output_item.done", "output_index": index, "item": reasoning})
+	}
+	index := len(items) - 1
+	events = append(events,
+		map[string]any{"type": "response.output_item.added", "output_index": index, "item": added},
+		map[string]any{"type": "response.content_part.added", "item_id": itemID, "output_index": index, "content_index": 0, "part": emptyPart},
+		map[string]any{"type": "response.output_text.delta", "item_id": itemID, "output_index": index, "content_index": 0, "delta": sample.Text},
+		map[string]any{"type": "response.output_text.done", "item_id": itemID, "output_index": index, "content_index": 0, "text": sample.Text},
+		map[string]any{"type": "response.content_part.done", "item_id": itemID, "output_index": index, "content_index": 0, "part": part},
+		map[string]any{"type": "response.output_item.done", "output_index": index, "item": item},
+		map[string]any{"type": "response.completed", "response": original})
 	var body strings.Builder
 	for i, event := range events {
 		event["sequence_number"] = i

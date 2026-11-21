@@ -120,13 +120,16 @@ usable usage are removed from the JSON state; valid samples are preserved and
 entries below the minimum sample count are collected again. No valid usage
 means the request goes upstream rather than fabricating a cached count.
 
-Responses replay is limited to stateless single-text inputs and complete,
-single-message text samples. It creates new response, output and attribution
-IDs consistently and emits the full text event sequence. Stateful requests,
-tools, structured/complex output, or samples with unmappable IDs go upstream.
+Responses replay is limited to stateless single-text inputs and complete text
+samples, optionally preceded by unencrypted reasoning summaries. It creates
+new response, output and attribution IDs consistently and emits the matching
+event sequence. Encrypted reasoning, stateful requests, tools, other complex
+output, or samples with unmappable IDs go upstream.
 Locally generated response IDs are not registered upstream and cannot be used
 as upstream `previous_response_id` values. Existing incompatible samples are
 preserved but excluded from replay and do not count toward activation.
+
+Reasoning replay boundaries and verification: [Responses reasoning replay](docs/responses-reasoning-replay.md).
 
 ---
 
