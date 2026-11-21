@@ -1,0 +1,60 @@
+session_routing:
+  enabled: true
+  state_file: data/cpa-session-route-bindings.json
+  binding_ttl: 1h
+  model_include_regex: '^gpt-'
+  default_category: general
+  categories:
+    general:
+      preferred_auth_ids: ['codex:apikey:5d99976c93e4']
+    benchmark:
+      preferred_auth_ids: ['codex-guilioenricomeille@gmail.com-plus.json']
+    quality:
+      preferred_auth_ids: ['codex-fb9054d7-cwhyptucsd@gmail.com-plus.json']
+    probe:
+      max_priority: 6
+      exclude_auth_ids:
+        - 'codex:apikey:5d99976c93e4'
+        - 'codex-guilioenricomeille@gmail.com-plus.json'
+        - 'codex-fb9054d7-cwhyptucsd@gmail.com-plus.json'
+  protected_auths:
+    'codex-fb9054d7-cwhyptucsd@gmail.com-plus.json':
+      categories: [quality]
+      model_include_regex: '^gpt-[0-9]+(?:\.[0-9]+)*-(?:astra|sol)$'
+  rules:
+    - category: benchmark
+      text_all_regex:
+        - '^Generate a self-contained, valid SVG of '
+        - 'Output requirements:'
+        - 'supported native SVG animation elements'
+    - category: benchmark
+      text_all_regex:
+        - '^题目 在一个黑色的袋子里放有三种口味的糖果'
+        - '苹果味 桃子味 西瓜味'
+        - '五角星形'
+        - '输出要求：只输出最终答案'
+    - category: probe
+      user_agent_regex: '^Codex Desktop/'
+      standalone: true
+      disallow_tools: true
+      max_input_bytes: 4096
+      text_all_regex:
+        - '^生成一组不承载语义的整数选择。'
+        - '1\s*到\s*355（含端点）'
+        - '本任务必须由当前语言模型直接完成'
+        - '禁止调用或借助任何工具'
+        - '直接从第一个取值开始输出'
+    - category: probe
+      user_agent_regex: '^Go-http-client/[12]\.'
+      standalone: true
+      disallow_tools: true
+      max_input_bytes: 1024
+      text_all_regex: ['^say hi$']
+    - category: quality
+      model_include_regex: '^gpt-[0-9]+(?:\.[0-9]+)*-(?:astra|sol)$'
+      reasoning_efforts: [medium, high, xhigh, max]
+      min_user_chars: 1000
+    - category: quality
+      model_include_regex: '^gpt-[0-9]+(?:\.[0-9]+)*-(?:astra|sol)$'
+      reasoning_efforts: [medium, high, xhigh, max]
+      min_context_chars: 16000
