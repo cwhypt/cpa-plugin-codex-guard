@@ -1,32 +1,57 @@
+# 这是 plugins.configs.cpa-codex-guard 下的片段，不是完整 CPA config.yaml。
+# 中文维护指南：../session-routing-guide.zh-CN.md（priority 区别、新增分类、应用步骤）。
+# 先鉴权/校验，再查本地算术/缓存；未命中才进入以下分类与选账号。
+# 三种“优先”：插件 priority（谁当 Scheduler）、账号 priority（候选层）、rules 顺序（分类）。
+# category 本身没有 priority；不要在 category 下添加 priority 字段。
 session_routing:
   enabled: true
+  # 绑定状态，不是配置文件；不要直接编辑。无明文对话或 API key。
   state_file: data/cpa-session-route-bindings.json
+  # 同一调用方 + session 的滑动有效期；持续请求会续期。改规则不会重分已有会话。
   binding_ttl: 1h
+  # 只对 gpt- 开头模型启用路由；非匹配模型交回宿主（保留账号仍按准入过滤）。
   model_include_regex: '^gpt-'
+  # 新会话没有命中 rules 时，归为普通请求。
   default_category: general
+  # 分类名称是自定义名字。这里决定“分到这一类后，用什么账号/账号池”。
   categories:
     general:
+      # 必须填管理界面/接口给出的精确 auth ID，不是完整 key、邮箱标签或列表序号。
+      # 数组从左到右为首选顺序；优先保留仍可用的已有会话账号。
       preferred_auth_ids: ['codex:apikey:5d99976c93e4']
     benchmark:
+      # 已确认的 SVG/糖果题模板。
       preferred_auth_ids: ['codex-guilioenricomeille@gmail.com-plus.json']
     quality:
+      # 达到下方模型、effort 和长度门槛的会话；短追问保留绑定。
       preferred_auth_ids: ['codex-fb9054d7-cwhyptucsd@gmail.com-plus.json']
     probe:
+      # 这是账号 priority 上限，包含 6（即整数 priority < 7），不是给 probe 设置 priority。
+      # 想把探针池限制为 priority <= 4，就改成 4。不要误改插件顶层 priority: 5。
+      # 选最高可用层；同层按账号 weight 平滑加权轮转，已有绑定不重复消耗轮转。
       max_priority: 6
+      # 排除三个保留账号；即使 quality 账号 priority=4，也不会借给探针。
       exclude_auth_ids:
         - 'codex:apikey:5d99976c93e4'
         - 'codex-guilioenricomeille@gmail.com-plus.json'
         - 'codex-fb9054d7-cwhyptucsd@gmail.com-plus.json'
+  # “首选”不等于“专用”。此处约束保留账号，包括回退选账号时的准入。
+  # 首选不可用时允许回退；quality 外的类别和非 astra/sol 模型不可回退到此账号。
   protected_auths:
     'codex-fb9054d7-cwhyptucsd@gmail.com-plus.json':
       categories: [quality]
       model_include_regex: '^gpt-[0-9]+(?:\.[0-9]+)*-(?:astra|sol)$'
+  # 从上到下，第一个全部条件匹配的规则获胜。同一条内是 AND，多条同 category 是 OR。
+  # text_all_regex 的每条正则都必须匹配首条有效 user 文本（不是 system 或最后一轮）。
+  # 正则用 Go RE2，不支持 lookahead/backreference；建议单引号以保留反斜杠。
   rules:
+    # 精确确认的 SVG 模板优先于后面的长文本 quality 规则。
     - category: benchmark
       text_all_regex:
         - '^Generate a self-contained, valid SVG of '
         - 'Output requirements:'
         - 'supported native SVG animation elements'
+    # 已确认的糖果模板；不要放宽成仅匹配“糖果”两个字。
     - category: benchmark
       text_all_regex:
         - '^题目 在一个黑色的袋子里放有三种口味的糖果'
@@ -34,9 +59,12 @@ session_routing:
         - '五角星形'
         - '输出要求：只输出最终答案'
     - category: probe
+      # UA 是客户端提示，不是身份认证；需要限制到调用方时另加 caller_scopes。
       user_agent_regex: '^Codex Desktop/'
+      # 仅独立单条 user；拒绝多轮、工具、previous_response_id/conversation 延续。
       standalone: true
       disallow_tools: true
+      # 整个请求 JSON 的字节上限，和 min_user_chars 的 Unicode 字符数不是一回事。
       max_input_bytes: 4096
       text_all_regex:
         - '^生成一组不承载语义的整数选择。'
@@ -44,17 +72,34 @@ session_routing:
         - '本任务必须由当前语言模型直接完成'
         - '禁止调用或借助任何工具'
         - '直接从第一个取值开始输出'
+    # 已确认的 say hi 探针；普通客户端说同样的话不会命中这一条。
     - category: probe
       user_agent_regex: '^Go-http-client/[12]\.'
       standalone: true
       disallow_tools: true
       max_input_bytes: 1024
       text_all_regex: ['^say hi$']
+    # quality 方式一：astra/sol + 显式 medium/high/xhigh/max + 首条 user >= 1000 字符。
+    # body 未给 effort 时只允许可信宿主 metadata 补充，不擅自当作 medium。
     - category: quality
       model_include_regex: '^gpt-[0-9]+(?:\.[0-9]+)*-(?:astra|sol)$'
       reasoning_efforts: [medium, high, xhigh, max]
       min_user_chars: 1000
+    # quality 方式二：相同模型/effort + 实际对话上下文 >= 16000 字符。
+    # 包含 user/assistant/tool 结果；排除 system/developer、工具定义、图片、加密 reasoning、调用参数。
+    # 两个长度条件拆成两条才是 OR；放在同一条会变成 AND。
     - category: quality
       model_include_regex: '^gpt-[0-9]+(?:\.[0-9]+)*-(?:astra|sol)$'
       reasoning_efforts: [medium, high, xhigh, max]
       min_context_chars: 16000
+
+  # 新增分类示意（只作注释；按以上缩进分别合并到 categories/rules）：
+  # categories:
+  #   translation:
+  #     preferred_auth_ids: ['<管理界面复制的真实 auth ID>']
+  # rules:  # 想让这类优先于 quality，应把这条插在 quality 规则前。
+  #   - category: translation
+  #     text_all_regex: ['(?i)^translate this document:']
+  # 分类名必须两边一致。若新增“专用账号”，还要考虑 protected_auths 和探针排除名单。
+  # 账号本身 priority 的修改位置：OAuth 凭据管理；API key 在 codex-api-key 对应项。
+  # 当前自动文件监听未恢复，改值后应经 Guard 管理配置接口应用，不能只保存文件。

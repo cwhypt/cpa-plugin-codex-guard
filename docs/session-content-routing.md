@@ -1,5 +1,8 @@
 # Configurable session-first account routing
 
+中文配置维护指南（priority、增加 category、应用配置）：[session-routing-guide.zh-CN.md](session-routing-guide.zh-CN.md)。
+The 0.4.0 deployment and observed live behavior are recorded in [releases/0.4.0-deployment.md](releases/0.4.0-deployment.md) and [releases/0.4.0-live-routing-audit.md](releases/0.4.0-live-routing-audit.md).
+
 ## Execution order
 
 1. CPA authenticates the downstream key and checks model access using its frontend authentication provider (for example, Key Policy X).
@@ -67,7 +70,7 @@ Scheduler and frontend authentication are separate capabilities. Key Policy X ca
 
 CPA calls only the first eligible Scheduler plugin. `Handled: false` falls back to built-in selection; it does not call Key Policy's Scheduler afterward. Therefore use Key Policy's `routing_mode: host` for this setup. Any legacy `override` group-selection policy needs separate integration before it can coexist with Guard owning Scheduler.
 
-Changing priority alone does not add Scheduler to an older Guard binary. The existing v0.3.8 release predates this implementation. This change is source-only until you build and load a new plugin artifact yourself.
+Changing priority alone does not add Scheduler to an older Guard binary. The v0.3.8 release predates this implementation; use a built and loaded routing-capable artifact (0.4.0 or later).
 
 ## Sessions, persistence and failure handling
 
@@ -110,4 +113,4 @@ Host source paths checked for ABI/order compatibility:
 - `sdk/cliproxy/auth/conductor_execution.go`: `publishSelectedAuthMetadata`, `applyRequestAfterAuthInterceptor`.
 - `internal/pluginhost/snapshot.go`, `scheduler.go`, `adapters_auth.go`: descending priority and independent capability selection.
 
-The plugin tests exercise its JSON ABI and lifecycle; host tests verify host behavior separately. Host `internal/pluginhost` scheduler/priority/frontend-authentication tests and `sdk/api/handlers` interceptor/caller-scope tests passed during implementation. The Windows binding-store test executable also cross-compiles successfully (not executed on Windows). These are not a live end-to-end deployment test of the new Scheduler. No production config or binaries are changed by this implementation.
+The plugin tests exercise its JSON ABI and lifecycle; host tests verify host behavior separately. Host `internal/pluginhost` scheduler/priority/frontend-authentication tests and `sdk/api/handlers` interceptor/caller-scope tests passed during implementation. The Windows binding-store test executable also cross-compiles successfully (not executed on Windows). These implementation-time tests are separate from the later 0.4.0 live deployment and post-deployment audit linked above.
