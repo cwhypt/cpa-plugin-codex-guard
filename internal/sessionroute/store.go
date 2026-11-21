@@ -243,10 +243,18 @@ func (s *Store) PickKey(key string, categories map[string]Route, candidates []Ca
 					break
 				}
 			}
-			return nil
+			if selected != "" || len(route.PreferredAuthIDs) == 0 {
+				return nil
+			}
 		}
 		var err error
-		selected, err = choose(route, candidates, binding.Category, state.Pools, now.Add(s.TTL))
+		// For an unavailable sticky account, try the ordered preferred accounts
+		// before falling back to the host or the protected-account pool.
+		selectionRoute := route
+		if binding.AuthID != "" {
+			selectionRoute.MaxPriority = nil
+		}
+		selected, err = choose(selectionRoute, candidates, binding.Category, state.Pools, now.Add(s.TTL))
 		if err != nil {
 			return err
 		}

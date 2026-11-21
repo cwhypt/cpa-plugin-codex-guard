@@ -46,6 +46,23 @@ func TestPersistentBindingAndFallback(t *testing.T) {
 	}
 }
 
+func TestUnavailableBindingUsesOrderedPreferredFallback(t *testing.T) {
+	s := &Store{Path: filepath.Join(t.TempDir(), "state.json"), TTL: time.Hour}
+	if _, err := s.ClassifyOnce("caller", "session", "general"); err != nil {
+		t.Fatal(err)
+	}
+	routes := map[string]Route{"general": {PreferredAuthIDs: []string{"first", "second"}}}
+	if id, ok, err := s.Pick("caller", "session", routes, []Candidate{{ID: "first"}, {ID: "second"}}); err != nil || !ok || id != "first" {
+		t.Fatalf("initial selection: %q %v %v", id, ok, err)
+	}
+	if id, ok, err := s.Pick("caller", "session", routes, []Candidate{{ID: "other", Priority: 99}, {ID: "second", Priority: 1}}); err != nil || !ok || id != "second" {
+		t.Fatalf("ordered fallback: %q %v %v", id, ok, err)
+	}
+	if id, ok, err := s.Pick("caller", "session", routes, []Candidate{{ID: "first"}, {ID: "second"}}); err != nil || !ok || id != "second" {
+		t.Fatalf("fallback binding must remain sticky: %q %v %v", id, ok, err)
+	}
+}
+
 func TestConcurrentFirstClassificationAndPick(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	routes := map[string]Route{"a": {PreferredAuthIDs: []string{"A"}}, "b": {PreferredAuthIDs: []string{"B"}}}
