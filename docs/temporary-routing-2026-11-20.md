@@ -1,5 +1,22 @@
 # 临时切回 guilioenricomeille（2026-11-20）
 
+## 后续调整：增加备选
+
+通过管理接口更新：general 首选 guilioenricomeille、第二首选 API `…pI`；
+quality 首选 guilioenricomeille、第二首选 cwhyptucsd；Astra SVG 的有序
+首选保持不变。API 账号的保护准入包含 general 和 astra_svg，quality 账号
+恢复 quality / astra-or-sol 的准入。更新前备份：
+`/home/cwhypt/cliproxyapi/.rollback/codex-fallback-20261121T064942Z/config.before.yaml`。
+
+**重要限制：** 当前实现只有在会话尚无绑定账号时按 `preferred_auth_ids`
+依序选择。已有绑定的账号不再是可用候选时，`PickKey` 不重新遍历首选列表；
+如有受保护账号被排除，则 `PickProtectedFallback` 按候选的账号 priority 和
+weight 选择，否则交给宿主选择。因此首选额度耗尽时无法保证已有会话严格
+选择第二首选；已有绑定若仍可用也不会因改配置自动切回第一首选。要保证
+已有会话的有序回退，需要修改 Guard 代码并另行构建部署验证。
+
+以下为更早的临时切换记录，后续调整以上文为准。
+
 通过 Guard 完整配置管理接口应用，磁盘与接口返回的配置一致。原配置备份：
 `/home/cwhypt/cliproxyapi/.rollback/codex-routing-20261121T064510Z/config.before.yaml`。
 该文件含敏感配置，不要公开。恢复时先核对其他配置变更，再仅恢复相关
