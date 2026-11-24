@@ -44,21 +44,22 @@ type Route struct {
 }
 
 type Rule struct {
-	Category         string   `yaml:"category" json:"category"`
-	Models           []string `yaml:"models" json:"models"`
-	ModelInclude     string   `yaml:"model_include_regex" json:"model_include_regex"`
-	ReasoningEfforts []string `yaml:"reasoning_efforts" json:"reasoning_efforts"`
-	MinUserChars     int      `yaml:"min_user_chars" json:"min_user_chars"`
-	MinContextChars  int      `yaml:"min_context_chars" json:"min_context_chars"`
-	UserAgent        string   `yaml:"user_agent_regex" json:"user_agent_regex"`
-	TextAll          []string `yaml:"text_all_regex" json:"text_all_regex"`
-	Standalone       bool     `yaml:"standalone" json:"standalone"`
-	DisallowTools    bool     `yaml:"disallow_tools" json:"disallow_tools"`
-	MaxInputBytes    int      `yaml:"max_input_bytes" json:"max_input_bytes"`
-	CallerScopes     []string `yaml:"caller_scopes" json:"caller_scopes"`
-	compiledUA       *regexp.Regexp
-	compiledModel    *regexp.Regexp
-	compiledTexts    []*regexp.Regexp
+	Category               string   `yaml:"category" json:"category"`
+	Models                 []string `yaml:"models" json:"models"`
+	ModelInclude           string   `yaml:"model_include_regex" json:"model_include_regex"`
+	ReasoningEfforts       []string `yaml:"reasoning_efforts" json:"reasoning_efforts"`
+	RequireReasoningEffort bool     `yaml:"require_reasoning_effort" json:"require_reasoning_effort"`
+	MinUserChars           int      `yaml:"min_user_chars" json:"min_user_chars"`
+	MinContextChars        int      `yaml:"min_context_chars" json:"min_context_chars"`
+	UserAgent              string   `yaml:"user_agent_regex" json:"user_agent_regex"`
+	TextAll                []string `yaml:"text_all_regex" json:"text_all_regex"`
+	Standalone             bool     `yaml:"standalone" json:"standalone"`
+	DisallowTools          bool     `yaml:"disallow_tools" json:"disallow_tools"`
+	MaxInputBytes          int      `yaml:"max_input_bytes" json:"max_input_bytes"`
+	CallerScopes           []string `yaml:"caller_scopes" json:"caller_scopes"`
+	compiledUA             *regexp.Regexp
+	compiledModel          *regexp.Regexp
+	compiledTexts          []*regexp.Regexp
 }
 
 // Compile validates and compiles configuration before publishing it to callers.
@@ -90,7 +91,7 @@ func (c *Config) Compile() error {
 	}
 	c.compiledModel = model
 	for name, route := range c.Categories {
-		if name == "" || len(route.PreferredAuthIDs) == 0 && route.MaxPriority == nil {
+		if name == "" || name != c.DefaultCategory && len(route.PreferredAuthIDs) == 0 && route.MaxPriority == nil {
 			return fmt.Errorf("category %q needs preferred_auth_ids or max_priority", name)
 		}
 		for _, id := range append(append([]string(nil), route.PreferredAuthIDs...), route.ExcludeAuthIDs...) {
@@ -123,7 +124,7 @@ func (c *Config) Compile() error {
 		if rule.MinUserChars < 0 || rule.MinContextChars < 0 || rule.MinUserChars > 15*1024*1024 || rule.MinContextChars > 15*1024*1024 {
 			return fmt.Errorf("rule %d has an invalid minimum text length", i)
 		}
-		if len(rule.TextAll) == 0 && (rule.MinUserChars == 0 && rule.MinContextChars == 0 || len(rule.ReasoningEfforts) == 0 || rule.ModelInclude == "" && len(rule.Models) == 0) {
+		if len(rule.TextAll) == 0 && (rule.MinUserChars == 0 && rule.MinContextChars == 0 || len(rule.ReasoningEfforts) == 0 && !rule.RequireReasoningEffort || rule.ModelInclude == "" && len(rule.Models) == 0) {
 			return fmt.Errorf("rule %d needs user text patterns or model, effort and minimum text length constraints", i)
 		}
 		for _, effort := range rule.ReasoningEfforts {
@@ -196,7 +197,7 @@ func (c *Config) ClassifyWithMetadata(model, userAgent, caller string, body []by
 	effort := reasoningEffort(body, metadata)
 	contextChars := -1
 	for _, rule := range c.Rules {
-		if rule.compiledModel != nil && !rule.compiledModel.MatchString(model) || len(rule.ReasoningEfforts) > 0 && !contains(rule.ReasoningEfforts, effort) || utf8.RuneCountInString(strings.TrimSpace(text)) < rule.MinUserChars {
+		if rule.compiledModel != nil && !rule.compiledModel.MatchString(model) || rule.RequireReasoningEffort && effort == "" || len(rule.ReasoningEfforts) > 0 && !contains(rule.ReasoningEfforts, effort) || utf8.RuneCountInString(strings.TrimSpace(text)) < rule.MinUserChars {
 			continue
 		}
 		if rule.MinContextChars > 0 {

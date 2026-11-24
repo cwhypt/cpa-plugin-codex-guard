@@ -1,6 +1,7 @@
 package sessionroute
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -54,6 +55,19 @@ rules:
 	}
 }
 
+func TestThinkingRequiresNonemptyEffort(t *testing.T) {
+	cfg := Config{Enabled: true, DefaultCategory: "general", BindingTTL: "1h", StateFile: "state.json", ModelInclude: `^gpt-`, Categories: map[string]Route{"general": {}, "thinking": {PreferredAuthIDs: []string{"api"}}}, Rules: []Rule{{Category: "thinking", ModelInclude: `^gpt-`, MinUserChars: 1000, RequireReasoningEffort: true}}}
+	if err := cfg.Compile(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ effort, want string }{{"", "general"}, {"low", "thinking"}, {"future", "thinking"}} {
+		body := []byte(`{"input":"` + strings.Repeat("a", 1000) + `","reasoning":{"effort":"` + tc.effort + `"}}`)
+		if got, ok := cfg.Classify("gpt-6-terra", "client", body); !ok || got != tc.want {
+			t.Fatalf("effort %q: got %q, %v", tc.effort, got, ok)
+		}
+	}
+}
+
 func TestInvalidRulesRejected(t *testing.T) {
 	base := Config{Enabled: true, DefaultCategory: "general", BindingTTL: "1h", StateFile: "state.json", ModelInclude: `^gpt-`, Categories: map[string]Route{"general": {PreferredAuthIDs: []string{"a"}}}}
 	missing := base
@@ -68,5 +82,16 @@ func TestInvalidRulesRejected(t *testing.T) {
 		if err := cfg.Compile(); err == nil {
 			t.Fatalf("expected invalid configuration to be rejected: %+v", cfg)
 		}
+	}
+}
+
+func TestEmptyDefaultRoute(t *testing.T) {
+	cfg := Config{Enabled: true, DefaultCategory: "general", BindingTTL: "1h", StateFile: "state.json", ModelInclude: `^gpt-`, Categories: map[string]Route{"general": {}}}
+	if err := cfg.Compile(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Categories["other"] = Route{}
+	if err := cfg.Compile(); err == nil {
+		t.Fatal("empty non-default route must be rejected")
 	}
 }
