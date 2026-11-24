@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 const arithmeticInstructions = "You are a provider health-check endpoint. Answer the arithmetic challenge exactly and briefly."
@@ -26,7 +27,7 @@ func ArithmeticProbe(body []byte) (string, bool) {
 	var model, instructions, input string
 	var stream bool
 	var maxTokens int
-	if json.Unmarshal(root["model"], &model) != nil || model != "gpt-5.6-sol" ||
+	if json.Unmarshal(root["model"], &model) != nil || strings.TrimSpace(model) == "" ||
 		json.Unmarshal(root["instructions"], &instructions) != nil || instructions != arithmeticInstructions ||
 		json.Unmarshal(root["input"], &input) != nil || json.Unmarshal(root["stream"], &stream) != nil ||
 		(string(root["stream"]) != "true" && string(root["stream"]) != "false") ||

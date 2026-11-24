@@ -23,6 +23,16 @@ func TestArithmeticProbe(t *testing.T) {
 		}
 	}
 	base["input"] = "Calculate and respond with ONLY the number, nothing else.\n\nQ: 3 + 5 = ?\nA: 8\n\nQ: 12 - 7 = ?\nA: 5\n\nQ: 21 + 30 = ?\nA:"
+	for _, model := range []string{"gpt-6.1-sol", "another-model", "", "   "} {
+		base["model"] = model
+		body, _ := json.Marshal(base)
+		got, ok := ArithmeticProbe(body)
+		wantOK := strings.TrimSpace(model) != ""
+		if ok != wantOK || ok && got != "51" {
+			t.Errorf("model %q: got %q, %v", model, got, ok)
+		}
+	}
+	base["model"] = "gpt-5.6-sol"
 	base["tools"] = []any{}
 	body, _ := json.Marshal(base)
 	if _, ok := ArithmeticProbe(body); ok {
