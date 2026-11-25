@@ -371,6 +371,11 @@ func (e *Engine) handleInterceptBefore(request []byte) ([]byte, error) {
 		e.pendingMu.Unlock()
 	}
 	if cfg.IsProbeCacheEnabled() && probeEng != nil && len(reqBody) > 0 {
+		if response := claudeHealthProbe(&req, reqBody); response != nil {
+			if encoded, err := json.Marshal(response); err == nil {
+				return json.Marshal(types.Envelope{OK: true, Result: encoded})
+			}
+		}
 		if answer, ok := probecache.ArithmeticProbe(reqBody); ok {
 			raw, _ := json.Marshal(map[string]any{
 				"id": "resp_arithmetic_source", "object": "response", "status": "completed",
