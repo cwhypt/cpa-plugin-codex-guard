@@ -16,6 +16,8 @@ func TestClaudeHealthProbe(t *testing.T) {
 		want   bool
 	}{
 		{"claude", false, `{"model":"claude-haiku-5-5","max_tokens":1,"messages":[{"role":"user","content":"."}]}`, true},
+		{"claude", false, `{"model":"claude-other","max_tokens":1,"messages":[{"role":"user","content":"."}]}`, true},
+		{"claude", false, `{"model":" ","max_tokens":1,"messages":[{"role":"user","content":"."}]}`, false},
 		{"claude", true, `{"model":"claude-haiku-5-5","max_tokens":1,"messages":[{"role":"user","content":"."}]}`, false},
 		{"openai", false, `{"model":"claude-haiku-5-5","max_tokens":1,"messages":[{"role":"user","content":"."}]}`, false},
 		{"claude", false, `{"model":"claude-haiku-5-5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`, false},
@@ -40,7 +42,11 @@ func TestClaudeHealthProbe(t *testing.T) {
 				Model string         `json:"model"`
 				Usage map[string]int `json:"usage"`
 			}
-			if json.Unmarshal(response.ResponseBody, &message) != nil || response.StatusCode != 200 || message.Type != "message" || message.Model != "claude-haiku-5-5" || message.Usage["input_tokens"] != 0 {
+			var request struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal([]byte(tc.body), &request)
+			if json.Unmarshal(response.ResponseBody, &message) != nil || response.StatusCode != 200 || message.Type != "message" || message.Model != request.Model || message.Usage["input_tokens"] != 0 {
 				t.Fatalf("invalid Claude response: %s", response.ResponseBody)
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"cpa-codex-guard/internal/types"
 )
@@ -21,7 +22,7 @@ func claudeHealthProbe(req *types.RequestInterceptRequest, body []byte) *types.R
 	var model string
 	var maxTokens int
 	var messages []map[string]json.RawMessage
-	if json.Unmarshal(root["model"], &model) != nil || model != "claude-haiku-5-5" ||
+	if json.Unmarshal(root["model"], &model) != nil || strings.TrimSpace(model) == "" ||
 		json.Unmarshal(root["max_tokens"], &maxTokens) != nil || maxTokens != 1 ||
 		json.Unmarshal(root["messages"], &messages) != nil || len(messages) != 1 || len(messages[0]) != 2 {
 		return nil
